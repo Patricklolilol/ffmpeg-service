@@ -1,68 +1,46 @@
-import os
-import subprocess
 from flask import Flask, request, jsonify, send_from_directory
+from redis import Redis
+from rq import Queue
+import os
+import jobs
 
 app = Flask(__name__)
 
-OUTPUTS_DIR = "outputs"
-os.makedirs(OUTPUTS_DIR, exist_ok=True)
+redis_conn = Redis(host="redis", port=6379)
+q = Queue(connection=redis_conn)
 
-@app.route("/health", methods=["GET"])
+OUTPUT_DIR = "outputs"
+
+@app.route("/health")
 def health():
     return jsonify({"status": "ok"})
 
 @app.route("/process", methods=["POST"])
 def process():
-    data = request.get_json()
+    data = request.json
     media_url = data.get("media_url")
-
     if not media_url:
-        return jsonify({"error": "No media_url provided"}), 400
+        return jsonify({"error": "media_url required"}), 400
 
+    job = q.enqueue(jobs.process_video, media_url)
+    return jsonify({"job_id": job.id, "status": "queued"})
+
+@app.route("/status/<job_id>")
+def status(job_id):
+    from rq.job import Job
     try:
-        # Download video at <=720p
-        input_path = os.path.join(OUTPUTS_DIR, "input.%(ext)s")
-        subprocess.run(
-            [
-                "yt-dlp",
-                "-f", "mp4[height<=720]+bestaudio/best[height<=720]",
-                "--merge-output-format", "mp4",
-                "-o", input_path,
-                media_url,
-            ],
-            check=True,
-        )
+        job = Job.fetch(job_id, connection=redis_conn)
+    except:
+        return jsonify({"error": "job not found"}), 404
 
-        input_file = "input.mp4"
-        input_fullpath = os.path.join(OUTPUTS_DIR, input_file)
-        output_file = "output.mp4"
-        output_fullpath = os.path.join(OUTPUTS_DIR, output_file)
+    if job.is_finished:
+        return jsonify({"status": "finished", "result": job.result})
+    elif job.is_failed:
+        return jsonify({"status": "failed", "error": str(job.exc_info)})
+    else:
+        return jsonify({"status": job.get_status()})
 
-        subprocess.run(
-            [
-                "ffmpeg", "-y",
-                "-i", input_fullpath,
-                "-c:v", "libx264",
-                "-c:a", "aac",
-                "-preset", "ultrafast",
-                output_fullpath
-            ],
-            check=True,
-        )
-
-        return jsonify({
-            "message": "Processing complete",
-            "input_file": input_file,
-            "output_file": output_file,
-            "download_url": f"/download/{output_file}"
-        })
-
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": f"Processing failed: {str(e)}"}), 500
-
-@app.route("/download/<path:filename>", methods=["GET"])
+@app.route("/download/<filename>")
 def download(filename):
-    return send_from_directory(OUTPUTS_DIR, filename, as_attachment=True)
+    return send_from_directory(OUTPUT_DIR, filename)
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
