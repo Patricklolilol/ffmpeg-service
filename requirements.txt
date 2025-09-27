@@ -2,3 +2,4 @@ flask
 redis
 rq
 gunicorn
+yt-dlp
