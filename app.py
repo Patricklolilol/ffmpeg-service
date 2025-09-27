@@ -2,94 +2,108 @@ import os
 import uuid
 import threading
 import subprocess
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_from_directory
+import yt_dlp
+from faster_whisper import WhisperModel
 
 app = Flask(__name__)
 
-# Store job states in memory (later: Redis/DB for scaling)
-JOBS = {}
-
+# Storage
+jobs = {}
 OUTPUT_DIR = "outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-def run_job(job_id, media_url):
+# Load Whisper once (small model = fast, base/medium = more accurate)
+model = WhisperModel("small", device="cpu", compute_type="int8")
+
+def download_and_process(job_id, media_url):
     try:
-        JOBS[job_id]["status"] = "downloading"
+        jobs[job_id]["status"] = "downloading"
+        video_path = os.path.join(OUTPUT_DIR, f"{job_id}.mp4")
 
-        input_file = os.path.join(OUTPUT_DIR, f"{job_id}.mp4")
-        output_file = os.path.join(OUTPUT_DIR, f"{job_id}_clip.mp4")
+        # Download video
+        ydl_opts = {
+            "outtmpl": video_path,
+            "format": "mp4/best",
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([media_url])
 
-        # ✅ Force yt-dlp to save to a known location
-        download_cmd = [
-            "yt-dlp",
-            "-f", "mp4",
-            "-o", input_file,   # Explicit output file
-            media_url,
-        ]
-        subprocess.run(download_cmd, check=True)
-
-        if not os.path.exists(input_file):
+        if not os.path.exists(video_path):
             raise Exception("Download did not produce file")
 
-        JOBS[job_id]["status"] = "processing"
-
-        # Clip first 30s
-        ffmpeg_cmd = [
+        # Cut first 30s (for now)
+        jobs[job_id]["status"] = "clipping"
+        clip_path = os.path.join(OUTPUT_DIR, f"{job_id}_clip.mp4")
+        command = [
             "ffmpeg", "-y",
             "-ss", "00:00:00",
-            "-i", input_file,
+            "-i", video_path,
             "-t", "30",
-            "-c", "copy",
-            output_file,
+            "-c:v", "libx264",
+            "-c:a", "aac",
+            clip_path
         ]
-        subprocess.run(ffmpeg_cmd, check=True)
+        subprocess.run(command, check=True)
 
-        if not os.path.exists(output_file):
-            raise Exception("Clipping failed")
+        # Transcribe
+        jobs[job_id]["status"] = "transcribing"
+        segments, info = model.transcribe(clip_path, beam_size=5)
+        srt_path = os.path.join(OUTPUT_DIR, f"{job_id}.srt")
+        with open(srt_path, "w", encoding="utf-8") as f:
+            for i, seg in enumerate(segments, start=1):
+                f.write(f"{i}\n")
+                f.write(f"{format_timestamp(seg.start)} --> {format_timestamp(seg.end)}\n")
+                f.write(f"{seg.text.strip()}\n\n")
 
-        JOBS[job_id]["status"] = "completed"
-        JOBS[job_id]["download_url"] = f"/download/{job_id}_clip.mp4"
+        # Done
+        jobs[job_id]["status"] = "completed"
+        jobs[job_id]["download_url"] = f"/download/{os.path.basename(clip_path)}"
+        jobs[job_id]["captions_url"] = f"/download/{os.path.basename(srt_path)}"
 
     except Exception as e:
-        JOBS[job_id]["status"] = "failed"
-        JOBS[job_id]["error"] = str(e)
+        jobs[job_id]["status"] = "failed"
+        jobs[job_id]["error"] = str(e)
 
 
 @app.route("/process", methods=["POST"])
 def process():
-    data = request.get_json()
+    data = request.json
     media_url = data.get("media_url")
-
     if not media_url:
         return jsonify({"error": "Missing media_url"}), 400
 
     job_id = str(uuid.uuid4())
-    JOBS[job_id] = {"status": "queued"}
+    jobs[job_id] = {"status": "queued"}
 
-    threading.Thread(target=run_job, args=(job_id, media_url)).start()
+    thread = threading.Thread(target=download_and_process, args=(job_id, media_url))
+    thread.start()
 
     return jsonify({"job_id": job_id, "status": "queued"})
 
 
-@app.route("/status/<job_id>", methods=["GET"])
+@app.route("/status/<job_id>")
 def status(job_id):
-    job = JOBS.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found"}), 404
-    return jsonify(job)
+    return jsonify(jobs.get(job_id, {"error": "Job not found"}))
 
 
-@app.route("/download/<path:filename>", methods=["GET"])
+@app.route("/download/<filename>")
 def download(filename):
-    filepath = os.path.join(OUTPUT_DIR, filename)
-    if not os.path.exists(filepath):
-        return jsonify({"error": "File not found"}), 404
-    return send_file(filepath, as_attachment=True)
+    return send_from_directory(OUTPUT_DIR, filename)
 
 
-@app.route("/health", methods=["GET"])
+@app.route("/health")
 def health():
     return jsonify({"status": "ok"})
+
+
+def format_timestamp(seconds: float):
+    """Convert seconds to SRT timestamp format"""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int((seconds % 1) * 1000)
+    return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
 
 if __name__ == "__main__":
