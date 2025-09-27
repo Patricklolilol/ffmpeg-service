@@ -7,8 +7,8 @@ RUN apt-get update && apt-get install -y ffmpeg curl && rm -rf /var/lib/apt/list
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Make sure yt-dlp is always the latest version
-RUN yt-dlp -U || true
+# Force latest yt-dlp every build (avoids YouTube breaking changes)
+RUN pip install --upgrade yt-dlp
 
 WORKDIR /app
 COPY . .
