@@ -1,19 +1,23 @@
 import os
 import uuid
+from flask import Flask, request, jsonify
 import redis
 from rq import Queue
-from flask import Flask, request, jsonify, send_from_directory
-from worker import process_video
+from rq.job import Job
 
 app = Flask(__name__)
 
-# Redis connection (Railway provides REDIS_URL)
-redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-conn = redis.from_url(redis_url)
-q = Queue(connection=conn)
+# Connect to Redis (Railway provides REDIS_URL automatically)
+redis_url = os.getenv("REDIS_URL")
+redis_conn = redis.from_url(redis_url)
+q = Queue(connection=redis_conn)
 
-OUTPUT_DIR = "outputs"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Background job function (defined in worker.py, imported dynamically)
+def enqueue_job(media_url):
+    job_id = str(uuid.uuid4())
+    q.enqueue("worker.process_video", media_url, job_id, job_id=job_id)
+    return job_id
 
 
 @app.route("/health")
@@ -25,33 +29,35 @@ def health():
 def process():
     data = request.get_json()
     media_url = data.get("media_url")
+
     if not media_url:
-        return jsonify({"error": "media_url is required"}), 400
+        return jsonify({"error": "Missing media_url"}), 400
 
-    job_id = str(uuid.uuid4())
-    job = q.enqueue(process_video, job_id, media_url, OUTPUT_DIR, job_id=job_id)
-
-    return jsonify({"job_id": job.get_id(), "status": "queued"})
+    job_id = enqueue_job(media_url)
+    return jsonify({"job_id": job_id, "status": "queued"})
 
 
-@app.route("/status/<job_id>", methods=["GET"])
+@app.route("/status/<job_id>")
 def status(job_id):
-    job = q.fetch_job(job_id)
-    if not job:
+    try:
+        job = Job.fetch(job_id, connection=redis_conn)
+    except Exception:
         return jsonify({"error": "Job not found"}), 404
 
     if job.is_failed:
         return jsonify({"status": "failed", "error": str(job.exc_info)})
+    elif job.is_finished:
+        return jsonify({"status": "completed", "download_url": f"/download/{job_id}_clip.mp4"})
+    else:
+        return jsonify({"status": job.get_status()})
 
-    if job.is_finished:
-        return jsonify({"status": "completed", "download_url": f"/download/{job.result}"})
 
-    return jsonify({"status": job.get_status()})
-
-
-@app.route("/download/<path:filename>", methods=["GET"])
+@app.route("/download/<filename>")
 def download(filename):
-    return send_from_directory(OUTPUT_DIR, filename, as_attachment=True)
+    file_path = os.path.join("outputs", filename)
+    if not os.path.exists(file_path):
+        return jsonify({"error": "File not found"}), 404
+    return app.send_static_file(file_path)
 
 
 if __name__ == "__main__":
