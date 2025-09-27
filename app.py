@@ -1,19 +1,22 @@
 import os
 import uuid
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from redis import Redis
 from rq import Queue
-from worker import process_media
+import traceback
 
 app = Flask(__name__)
 
-# Redis connection
-redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+# Redis connection (Railway injects REDIS_URL)
+redis_url = os.getenv("REDIS_URL")
+if not redis_url:
+    raise RuntimeError("❌ REDIS_URL environment variable is not set")
+
 redis_conn = Redis.from_url(redis_url)
 q = Queue(connection=redis_conn)
 
-# Ensure outputs dir exists
-os.makedirs("outputs", exist_ok=True)
+# Import task function from worker
+from worker import process_media
 
 
 @app.route("/health")
@@ -34,6 +37,7 @@ def process():
 
         return jsonify({"job_id": job.get_id(), "status": "queued"})
     except Exception as e:
+        print("❌ ERROR in /process:", traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 
@@ -44,15 +48,24 @@ def status(job_id):
         if not job:
             return jsonify({"error": "Job not found"}), 404
 
-        if job.is_finished:
-            return jsonify({"status": "completed", "result": job.result})
-        elif job.is_failed:
+        if job.is_failed:
             return jsonify({"status": "failed", "error": str(job.exc_info)})
+        elif job.result:
+            return jsonify({"status": "completed", "download_url": job.result["download_url"]})
         else:
-            return jsonify({"status": job.get_status()})
+            return jsonify({"status": "processing"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/download/<path:filename>")
+def download(filename):
+    try:
+        return send_from_directory("outputs", filename, as_attachment=True)
+    except FileNotFoundError:
+        return jsonify({"error": "File not found"}), 404
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+    port = int(os.getenv("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
