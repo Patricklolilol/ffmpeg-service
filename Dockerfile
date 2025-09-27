@@ -10,5 +10,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 WORKDIR /app
 COPY . .
 
-# Run with Gunicorn + Uvicorn worker
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8080", "app:app"]
+# Start with gunicorn + uvicorn worker
+CMD ["gunicorn", "-w", "2", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8080", "app:app"]
