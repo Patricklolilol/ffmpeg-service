@@ -3,4 +3,4 @@ gunicorn
 yt-dlp
 redis
 rq
-
+faster-whisper
