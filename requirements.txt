@@ -1,4 +1,4 @@
 flask
 redis
 rq
-yt-dlp
+gunicorn
