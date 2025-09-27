@@ -1,40 +1,42 @@
 #!/bin/bash
 
 # FFmpeg Service Startup Script
-# This script demonstrates how to start the service with different configurations
+# Railway-compatible version
 
 echo "FFmpeg Service Startup Script"
 echo "=============================="
 
-# Check if running in Docker
-if [ -f /.dockerenv ]; then
-    echo "Running in Docker container"
+# Set defaults if not provided
+FLASK_PORT=${FLASK_PORT:-8080}
+GUNICORN_WORKERS=${GUNICORN_WORKERS:-4}
+GUNICORN_WORKER_CLASS=${GUNICORN_WORKER_CLASS:-sync}
+GUNICORN_TIMEOUT=${GUNICORN_TIMEOUT:-120}
+GUNICORN_MAX_REQUESTS=${GUNICORN_MAX_REQUESTS:-1000}
+GUNICORN_MAX_REQUESTS_JITTER=${GUNICORN_MAX_REQUESTS_JITTER:-100}
+
+# Check if Gunicorn is installed
+if command -v gunicorn >/dev/null 2>&1; then
     echo "Starting FFmpeg Service with Gunicorn..."
-    echo "Workers: ${GUNICORN_WORKERS:-4}"
-    echo "Worker Class: ${GUNICORN_WORKER_CLASS:-sync}"
-    echo "Timeout: ${GUNICORN_TIMEOUT:-120}s"
-    echo "Max Requests: ${GUNICORN_MAX_REQUESTS:-1000}"
-    echo "Port: ${FLASK_PORT:-8080}"
-    echo ""
+    echo "Workers: $GUNICORN_WORKERS"
+    echo "Worker Class: $GUNICORN_WORKER_CLASS"
+    echo "Timeout: $GUNICORN_TIMEOUT"
+    echo "Max Requests: $GUNICORN_MAX_REQUESTS (+ jitter $GUNICORN_MAX_REQUESTS_JITTER)"
+    echo "Port: $FLASK_PORT"
     
     exec gunicorn \
-        --bind 0.0.0.0:${FLASK_PORT:-8080} \
-        --workers ${GUNICORN_WORKERS:-4} \
-        --worker-class ${GUNICORN_WORKER_CLASS:-sync} \
-        --timeout ${GUNICORN_TIMEOUT:-120} \
-        --max-requests ${GUNICORN_MAX_REQUESTS:-1000} \
-        --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER:-100} \
+        --bind 0.0.0.0:$FLASK_PORT \
+        --workers $GUNICORN_WORKERS \
+        --worker-class $GUNICORN_WORKER_CLASS \
+        --timeout $GUNICORN_TIMEOUT \
+        --max-requests $GUNICORN_MAX_REQUESTS \
+        --max-requests-jitter $GUNICORN_MAX_REQUESTS_JITTER \
         --access-logfile - \
         --error-logfile - \
         --log-level info \
         app:app
 else
-    echo "Running in local environment"
-    echo "Starting Flask development server..."
-    echo "Port: ${FLASK_PORT:-8080}"
+    echo "Gunicorn not found, starting Flask development server..."
+    echo "Port: $FLASK_PORT"
     echo "Debug: ${FLASK_DEBUG:-false}"
-    echo ""
-    
-    # For local development, use Flask's built-in server
     python app.py
-fi 
+fi
