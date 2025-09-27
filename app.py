@@ -20,12 +20,12 @@ def process():
         return jsonify({"error": "No media_url provided"}), 400
 
     try:
-        # Download full video + audio as MP4
+        # Download video at <=720p
         input_path = os.path.join(OUTPUTS_DIR, "input.%(ext)s")
         subprocess.run(
             [
                 "yt-dlp",
-                "-f", "bestvideo+bestaudio",
+                "-f", "mp4[height<=720]+bestaudio/best[height<=720]",
                 "--merge-output-format", "mp4",
                 "-o", input_path,
                 media_url,
@@ -33,19 +33,18 @@ def process():
             check=True,
         )
 
-        # Ensure consistent output file name
         input_file = "input.mp4"
         input_fullpath = os.path.join(OUTPUTS_DIR, input_file)
         output_file = "output.mp4"
         output_fullpath = os.path.join(OUTPUTS_DIR, output_file)
 
-        # Convert or re-encode to guarantee playable mp4
         subprocess.run(
             [
                 "ffmpeg", "-y",
                 "-i", input_fullpath,
                 "-c:v", "libx264",
                 "-c:a", "aac",
+                "-preset", "ultrafast",
                 output_fullpath
             ],
             check=True,
@@ -67,45 +66,3 @@ def download(filename):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
-
-        )
-        if result.returncode != 0:
-            return jsonify({
-                "error": "yt-dlp failed",
-                "stdout": result.stdout,
-                "stderr": result.stderr
-            }), 500
-
-        # Step 2: Find downloaded file
-        downloaded_files = glob.glob(os.path.join(OUTPUT_DIR, "input.*"))
-        if not downloaded_files:
-            return jsonify({"error": "No file downloaded"}), 500
-        input_file = downloaded_files[0]
-
-        # Step 3: Convert to MP3
-        output_file = os.path.join(OUTPUT_DIR, "output.mp3")
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-i", input_file, output_file],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode != 0:
-            return jsonify({
-                "error": "ffmpeg failed",
-                "stdout": result.stdout,
-                "stderr": result.stderr
-            }), 500
-
-        return jsonify({
-            "message": "Processing complete",
-            "input_file": os.path.basename(input_file),
-            "output_file": os.path.basename(output_file),
-            "download_url": f"/download/{os.path.basename(output_file)}"
-        })
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/download/<filename>", methods=["GET"])
-def download(filename):
-    return send_from_directory(OUTPUT_DIR, filename, as_attachment=True)
