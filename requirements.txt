@@ -2,5 +2,3 @@ flask
 redis
 rq
 yt-dlp
-ffmpeg-python
-gunicorn
