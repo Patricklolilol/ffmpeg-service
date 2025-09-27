@@ -1,19 +1,40 @@
 import os
 import subprocess
+import uuid
 
-def process_video(media_url, job_id):
-    """
-    Downloads the video and creates a short clip.
-    """
-    input_file = f"outputs/{job_id}.mp4"
+def process_media(media_url, job_id):
+    os.makedirs("outputs", exist_ok=True)
+
+    input_file = f"outputs/{job_id}.%(ext)s"
     output_file = f"outputs/{job_id}_clip.mp4"
 
-    # Step 1: Download video
-    cmd_download = ["yt-dlp", "-f", "mp4", "-o", input_file, media_url]
-    subprocess.run(cmd_download, check=True)
+    try:
+        # Step 1: Download with yt-dlp
+        subprocess.run(
+            ["yt-dlp", "-f", "best", "-o", input_file, media_url],
+            check=True
+        )
 
-    # Step 2: Create 30s clip
-    cmd_clip = ["ffmpeg", "-y", "-ss", "00:00:00", "-i", input_file, "-t", "30", "-c", "copy", output_file]
-    subprocess.run(cmd_clip, check=True)
+        # Find the downloaded file (yt-dlp replaces %(ext)s)
+        for f in os.listdir("outputs"):
+            if f.startswith(job_id):
+                downloaded = os.path.join("outputs", f)
+                break
+        else:
+            raise Exception("Download did not produce file")
 
-    return {"download_url": f"/download/{job_id}_clip.mp4"}
+        # Step 2: Clip with ffmpeg (first 30s as example)
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-ss", "00:00:00",
+                "-i", downloaded, "-t", "30",
+                "-c:v", "libx264", "-c:a", "aac",
+                output_file
+            ],
+            check=True
+        )
+
+        return {"download_url": f"/download/{os.path.basename(output_file)}"}
+
+    except subprocess.CalledProcessError as e:
+        raise Exception(f"Command failed: {e}")
