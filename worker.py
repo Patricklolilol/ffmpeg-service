@@ -1,11 +1,29 @@
-import jobs
-from redis import Redis
-from rq import Worker, Queue, Connection
+import os
+import subprocess
 
-listen = ['default']
-redis_conn = Redis(host="redis", port=6379)
+def process_video(job_id, media_url, output_dir):
+    try:
+        input_path = os.path.join(output_dir, f"{job_id}.mp4")
+        output_path = os.path.join(output_dir, f"{job_id}_clip.mp4")
 
-if __name__ == "__main__":
-    with Connection(redis_conn):
-        worker = Worker(list(map(Queue, listen)))
-        worker.work()
+        # Download video
+        result = subprocess.run(
+            ["yt-dlp", "-f", "mp4", "-o", input_path, media_url],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Download failed: {result.stderr}")
+
+        # Cut a 30s clip (placeholder until smart clipping)
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-ss", "00:00:00", "-i", input_path,
+             "-t", "30", "-c", "copy", output_path],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"FFmpeg failed: {result.stderr}")
+
+        return os.path.basename(output_path)
+
+    except Exception as e:
+        raise RuntimeError(str(e))
