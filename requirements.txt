@@ -1,5 +1,6 @@
-flask
-flask-cors
-werkzeug
-gunicorn
-yt-dlp
+fastapi==0.110.0
+uvicorn==0.29.0
+gunicorn==21.2.0
+yt-dlp==2025.1.26
+ffmpeg-python==0.2.0
+pydantic==2.6.1
