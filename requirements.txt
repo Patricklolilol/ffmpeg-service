@@ -1,6 +1,6 @@
 flask
-gunicorn
-yt-dlp
 redis
 rq
-faster-whisper
+yt-dlp
+ffmpeg-python
+gunicorn
