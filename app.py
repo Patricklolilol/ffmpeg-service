@@ -27,7 +27,7 @@ def download_youtube_video(url, download_dir):
     filepath = os.path.join(download_dir, filename)
 
     cmd = [
-        "yt-dlp",
+        "python3", "-m", "yt_dlp",
         "-f", "mp4",
         "-o", filepath,
         url
@@ -39,7 +39,8 @@ def download_youtube_video(url, download_dir):
             return filepath
         else:
             return None
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as e:
+        print("yt-dlp failed:", e)
         return None
 
 
