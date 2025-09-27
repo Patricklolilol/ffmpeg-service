@@ -1,105 +1,77 @@
 import os
-import tempfile
 import subprocess
 import uuid
 from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
 
-OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "/app/output")
+OUTPUT_DIR = "outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-
-def run_command(cmd):
-    """Run shell command and capture output + errors."""
+def download_youtube_video(url: str, output_path: str) -> bool:
+    """Download YouTube video with yt-dlp."""
     try:
-        result = subprocess.run(
-            cmd, check=True, capture_output=True, text=True
+        subprocess.run(
+            ["yt-dlp", "-f", "best[ext=mp4]", "-o", output_path, url],
+            check=True
         )
-        return result.stdout.strip(), result.stderr.strip()
-    except subprocess.CalledProcessError as e:
-        return None, e.stderr.strip()
+        return True
+    except subprocess.CalledProcessError:
+        return False
 
-
-def download_youtube_video(url, download_dir):
-    """Download YouTube video using yt-dlp and return local filepath."""
-    filename = str(uuid.uuid4()) + ".mp4"
-    filepath = os.path.join(download_dir, filename)
-
-    cmd = [
-        "python3", "-m", "yt_dlp",
-        "-f", "mp4",
-        "-o", filepath,
-        url
-    ]
-
+def process_video(input_path: str, output_path: str) -> bool:
+    """Use ffmpeg to process video (trim first 30s)."""
     try:
-        subprocess.run(cmd, check=True)
-        if os.path.exists(filepath):
-            return filepath
-        else:
-            return None
-    except subprocess.CalledProcessError as e:
-        print("yt-dlp failed:", e)
-        return None
-
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", input_path,
+                "-t", "30",  # trim to first 30s
+                "-c:v", "libx264",
+                "-c:a", "aac",
+                output_path
+            ],
+            check=True
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
 
 @app.route("/process", methods=["POST"])
 def process():
-    data = request.get_json(force=True)
-    media_url = data.get("media_url")
+    data = request.get_json()
+    if not data or "media_url" not in data:
+        return jsonify({"code": 400, "msg": "Missing media_url"}), 400
 
-    if not media_url:
-        return jsonify({"code": 400, "msg": "Missing media_url", "data": {}}), 400
+    media_url = data["media_url"]
+    job_id = str(uuid.uuid4())
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        local_file = None
+    input_path = os.path.join(OUTPUT_DIR, f"{job_id}_input.mp4")
+    output_path = os.path.join(OUTPUT_DIR, f"{job_id}_output.mp4")
 
-        # Handle YouTube URLs
-        if "youtube.com" in media_url or "youtu.be" in media_url:
-            local_file = download_youtube_video(media_url, tmpdir)
-            if not local_file:
-                return jsonify(
-                    {"code": 400, "msg": "Failed to download YouTube video", "data": {}}
-                ), 400
-        else:
-            local_file = media_url
+    # Step 1: Download
+    if not download_youtube_video(media_url, input_path):
+        return jsonify({"code": 400, "msg": "Failed to download YouTube video"}), 400
 
-        # Output file
-        out_filename = str(uuid.uuid4()) + ".mp4"
-        out_path = os.path.join(OUTPUT_DIR, out_filename)
+    # Step 2: Process
+    if not process_video(input_path, output_path):
+        return jsonify({"code": 500, "msg": "FFmpeg processing failed"}), 500
 
-        # Run ffmpeg
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i", local_file,
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            out_path
-        ]
-        stdout, stderr = run_command(cmd)
+    # Step 3: Return result
+    return jsonify({
+        "code": 0,
+        "msg": "Success",
+        "data": {
+            "job_id": job_id,
+            "clip_url": f"/outputs/{job_id}_output.mp4"
+        }
+    }), 200
 
-        if not os.path.exists(out_path):
-            return jsonify(
-                {"code": 500, "msg": "FFmpeg processing failed", "error": stderr, "data": {}}
-            ), 500
-
-        return jsonify(
-            {
-                "code": 0,
-                "msg": "Processing complete",
-                "data": {
-                    "video": f"/output/{out_filename}",
-                },
-            }
-        )
-
-
-@app.route("/output/<path:filename>")
+@app.route("/outputs/<path:filename>")
 def serve_output(filename):
     return send_from_directory(OUTPUT_DIR, filename, as_attachment=True)
 
-
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=8080)
