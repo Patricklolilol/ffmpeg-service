@@ -10,5 +10,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 WORKDIR /app
 COPY . .
 
-# Run FastAPI app with Gunicorn + Uvicorn worker
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8080", "app:app"]
+# Run with Gunicorn (Flask app)
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "app:app"]
