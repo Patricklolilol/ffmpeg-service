@@ -7,10 +7,8 @@ RUN apt-get update && apt-get install -y ffmpeg curl && rm -rf /var/lib/apt/list
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Force latest yt-dlp every build (avoids YouTube breaking changes)
-RUN pip install --upgrade yt-dlp
-
 WORKDIR /app
 COPY . .
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "app:app"]
+# Run with Gunicorn + Uvicorn worker
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8080", "app:app"]
