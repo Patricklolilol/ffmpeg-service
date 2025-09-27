@@ -1,5 +1,6 @@
 flask
 gunicorn
 yt-dlp
-ffmpeg-python
-uvicorn
+redis
+rq
+
