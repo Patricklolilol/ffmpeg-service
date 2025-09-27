@@ -1,0 +1,20 @@
+# Temporary files
+temp/
+*.tmp
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Virtual environment
+venv/
+env/
+
+.venv/
+
+logs/
