@@ -7,8 +7,10 @@ RUN apt-get update && apt-get install -y ffmpeg curl && rm -rf /var/lib/apt/list
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Make sure yt-dlp is always the latest version
+RUN yt-dlp -U || true
+
 WORKDIR /app
 COPY . .
 
-# Run with Gunicorn (Flask app)
 CMD ["gunicorn", "--bind", "0.0.0.0:8080", "app:app"]
