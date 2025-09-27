@@ -3,18 +3,17 @@ import subprocess
 
 def process_video(media_url, job_id):
     """
-    Downloads a video from YouTube, clips first 30s, saves it.
+    Downloads the video and creates a short clip.
     """
-    os.makedirs("outputs", exist_ok=True)
-    input_path = f"outputs/{job_id}.mp4"
-    output_path = f"outputs/{job_id}_clip.mp4"
+    input_file = f"outputs/{job_id}.mp4"
+    output_file = f"outputs/{job_id}_clip.mp4"
 
-    # 1. Download with yt-dlp
-    cmd_dl = ["yt-dlp", "-f", "best", "-o", input_path, media_url]
-    subprocess.run(cmd_dl, check=True)
+    # Step 1: Download video
+    cmd_download = ["yt-dlp", "-f", "mp4", "-o", input_file, media_url]
+    subprocess.run(cmd_download, check=True)
 
-    # 2. Clip with ffmpeg
-    cmd_ffmpeg = ["ffmpeg", "-y", "-ss", "00:00:00", "-i", input_path, "-t", "30", "-c", "copy", output_path]
-    subprocess.run(cmd_ffmpeg, check=True)
+    # Step 2: Create 30s clip
+    cmd_clip = ["ffmpeg", "-y", "-ss", "00:00:00", "-i", input_file, "-t", "30", "-c", "copy", output_file]
+    subprocess.run(cmd_clip, check=True)
 
-    return output_path
+    return {"download_url": f"/download/{job_id}_clip.mp4"}
