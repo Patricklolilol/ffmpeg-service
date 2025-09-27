@@ -10,5 +10,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 WORKDIR /app
 COPY . .
 
-# Start with gunicorn + uvicorn worker
-CMD ["gunicorn", "-w", "2", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8080", "app:app"]
+# Run with Gunicorn in WSGI mode for Flask
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "app:app"]
