@@ -3,7 +3,6 @@ import tempfile
 import subprocess
 import uuid
 from flask import Flask, request, jsonify, send_from_directory
-from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
@@ -12,27 +11,35 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 def run_command(cmd):
-    """Run shell command safely and capture output."""
+    """Run shell command and capture output + errors."""
     try:
         result = subprocess.run(
-            cmd, shell=True, check=True, capture_output=True, text=True
+            cmd, check=True, capture_output=True, text=True
         )
-        return result.stdout.strip()
+        return result.stdout.strip(), result.stderr.strip()
     except subprocess.CalledProcessError as e:
-        return None
+        return None, e.stderr.strip()
 
 
 def download_youtube_video(url, download_dir):
-    """Download YouTube video using yt-dlp."""
+    """Download YouTube video using yt-dlp and return local filepath."""
+    filename = str(uuid.uuid4()) + ".mp4"
+    filepath = os.path.join(download_dir, filename)
+
+    cmd = [
+        "yt-dlp",
+        "-f", "mp4",
+        "-o", filepath,
+        url
+    ]
+
     try:
-        filename = str(uuid.uuid4()) + ".mp4"
-        filepath = os.path.join(download_dir, filename)
-        cmd = f'yt-dlp -f best -o "{filepath}" "{url}"'
-        success = run_command(cmd)
-        if success is None or not os.path.exists(filepath):
+        subprocess.run(cmd, check=True)
+        if os.path.exists(filepath):
+            return filepath
+        else:
             return None
-        return filepath
-    except Exception:
+    except subprocess.CalledProcessError:
         return None
 
 
@@ -44,7 +51,6 @@ def process():
     if not media_url:
         return jsonify({"code": 400, "msg": "Missing media_url", "data": {}}), 400
 
-    # Create temp working dir
     with tempfile.TemporaryDirectory() as tmpdir:
         local_file = None
 
@@ -56,20 +62,26 @@ def process():
                     {"code": 400, "msg": "Failed to download YouTube video", "data": {}}
                 ), 400
         else:
-            # Direct file URL (not YouTube)
             local_file = media_url
 
-        # Generate output file path
+        # Output file
         out_filename = str(uuid.uuid4()) + ".mp4"
         out_path = os.path.join(OUTPUT_DIR, out_filename)
 
-        # Run ffmpeg conversion (copy video/audio stream to mp4)
-        cmd = f'ffmpeg -y -i "{local_file}" -c:v libx264 -c:a aac "{out_path}"'
-        success = run_command(cmd)
+        # Run ffmpeg
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", local_file,
+            "-c:v", "libx264",
+            "-c:a", "aac",
+            out_path
+        ]
+        stdout, stderr = run_command(cmd)
 
-        if success is None or not os.path.exists(out_path):
+        if not os.path.exists(out_path):
             return jsonify(
-                {"code": 500, "msg": "FFmpeg processing failed", "data": {}}
+                {"code": 500, "msg": "FFmpeg processing failed", "error": stderr, "data": {}}
             ), 500
 
         return jsonify(
