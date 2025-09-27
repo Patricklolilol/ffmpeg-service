@@ -1,66 +1,74 @@
 import os
 import uuid
 import subprocess
+import threading
 from flask import Flask, request, jsonify, send_from_directory
-from threading import Thread
 
 app = Flask(__name__)
-
-# store job info in memory (later we can move to Redis/db)
-jobs = {}
-
 OUTPUT_DIR = "outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# Store jobs in memory
+jobs = {}
 
-def process_video(job_id, media_url):
+def run_job(job_id, media_url):
     try:
-        input_file = os.path.join(OUTPUT_DIR, f"{job_id}.mp4")
-        clip_file = os.path.join(OUTPUT_DIR, f"{job_id}_clip.mp4")
-
-        # Step 1: Download video
         jobs[job_id]["status"] = "downloading"
-        cmd_dl = ["yt-dlp", "-f", "bestvideo+bestaudio", "-o", input_file, media_url]
-        subprocess.run(cmd_dl, check=True)
 
-        # Step 2: Clip first 30s without re-encoding
-        jobs[job_id]["status"] = "processing"
-        cmd_clip = [
-            "ffmpeg",
-            "-ss", "00:00:00",
-            "-i", input_file,
-            "-t", "30",
-            "-c", "copy",      # no re-encode, just cut
-            clip_file
+        # Download video with yt-dlp
+        input_file = os.path.join(OUTPUT_DIR, f"{job_id}.mp4")
+        download_cmd = [
+            "yt-dlp", "-f", "bestvideo+bestaudio/best",
+            "-o", input_file, media_url
         ]
-        subprocess.run(cmd_clip, check=True)
 
-        # Success
+        result = subprocess.run(download_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            jobs[job_id]["status"] = "failed"
+            jobs[job_id]["error"] = f"Download failed: {result.stderr}"
+            return
+
+        if not os.path.exists(input_file):
+            jobs[job_id]["status"] = "failed"
+            jobs[job_id]["error"] = "Download did not produce file"
+            return
+
+        jobs[job_id]["status"] = "processing"
+
+        # Clip first 30s
+        output_file = os.path.join(OUTPUT_DIR, f"{job_id}_clip.mp4")
+        clip_cmd = [
+            "ffmpeg", "-y", "-ss", "00:00:00",
+            "-i", input_file, "-t", "30",
+            "-c:v", "libx264", "-c:a", "aac",
+            output_file
+        ]
+
+        result = subprocess.run(clip_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            jobs[job_id]["status"] = "failed"
+            jobs[job_id]["error"] = f"FFmpeg failed: {result.stderr}"
+            return
+
         jobs[job_id]["status"] = "completed"
-        jobs[job_id]["download_url"] = f"/download/{job_id}_clip.mp4"
+        jobs[job_id]["download_url"] = f"/download/{os.path.basename(output_file)}"
 
-    except subprocess.CalledProcessError as e:
+    except Exception as e:
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["error"] = str(e)
 
 
-@app.route("/health")
-def health():
-    return jsonify({"status": "ok"})
-
-
 @app.route("/process", methods=["POST"])
 def process():
-    data = request.json
+    data = request.get_json()
     media_url = data.get("media_url")
-
     if not media_url:
         return jsonify({"error": "Missing media_url"}), 400
 
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status": "queued"}
 
-    thread = Thread(target=process_video, args=(job_id, media_url))
+    thread = threading.Thread(target=run_job, args=(job_id, media_url))
     thread.start()
 
     return jsonify({"job_id": job_id, "status": "queued"})
@@ -74,9 +82,14 @@ def status(job_id):
     return jsonify(job)
 
 
-@app.route("/download/<path:filename>")
+@app.route("/download/<filename>")
 def download(filename):
     return send_from_directory(OUTPUT_DIR, filename, as_attachment=True)
+
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"})
 
 
 if __name__ == "__main__":
