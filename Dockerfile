@@ -8,4 +8,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 WORKDIR /app
 COPY . .
 
+# Default command (API service)
 CMD ["gunicorn", "-b", "0.0.0.0:8080", "app:app"]
