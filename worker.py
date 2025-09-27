@@ -1,29 +1,20 @@
 import os
 import subprocess
 
-def process_video(job_id, media_url, output_dir):
-    try:
-        input_path = os.path.join(output_dir, f"{job_id}.mp4")
-        output_path = os.path.join(output_dir, f"{job_id}_clip.mp4")
+def process_video(media_url, job_id):
+    """
+    Downloads a video from YouTube, clips first 30s, saves it.
+    """
+    os.makedirs("outputs", exist_ok=True)
+    input_path = f"outputs/{job_id}.mp4"
+    output_path = f"outputs/{job_id}_clip.mp4"
 
-        # Download video
-        result = subprocess.run(
-            ["yt-dlp", "-f", "mp4", "-o", input_path, media_url],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Download failed: {result.stderr}")
+    # 1. Download with yt-dlp
+    cmd_dl = ["yt-dlp", "-f", "best", "-o", input_path, media_url]
+    subprocess.run(cmd_dl, check=True)
 
-        # Cut a 30s clip (placeholder until smart clipping)
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-ss", "00:00:00", "-i", input_path,
-             "-t", "30", "-c", "copy", output_path],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"FFmpeg failed: {result.stderr}")
+    # 2. Clip with ffmpeg
+    cmd_ffmpeg = ["ffmpeg", "-y", "-ss", "00:00:00", "-i", input_path, "-t", "30", "-c", "copy", output_path]
+    subprocess.run(cmd_ffmpeg, check=True)
 
-        return os.path.basename(output_path)
-
-    except Exception as e:
-        raise RuntimeError(str(e))
+    return output_path
