@@ -13,8 +13,9 @@ jobs = {}
 OUTPUT_DIR = "outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Load Whisper once (small model = fast, base/medium = more accurate)
+# Load Whisper once (fast + accurate enough)
 model = WhisperModel("small", device="cpu", compute_type="int8")
+
 
 def download_and_process(job_id, media_url):
     try:
@@ -32,7 +33,7 @@ def download_and_process(job_id, media_url):
         if not os.path.exists(video_path):
             raise Exception("Download did not produce file")
 
-        # Cut first 30s (for now)
+        # Cut first 30s (temporary until smart clipping)
         jobs[job_id]["status"] = "clipping"
         clip_path = os.path.join(OUTPUT_DIR, f"{job_id}_clip.mp4")
         command = [
@@ -49,6 +50,8 @@ def download_and_process(job_id, media_url):
         # Transcribe
         jobs[job_id]["status"] = "transcribing"
         segments, info = model.transcribe(clip_path, beam_size=5)
+
+        # Write SRT
         srt_path = os.path.join(OUTPUT_DIR, f"{job_id}.srt")
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, seg in enumerate(segments, start=1):
@@ -56,9 +59,21 @@ def download_and_process(job_id, media_url):
                 f.write(f"{format_timestamp(seg.start)} --> {format_timestamp(seg.end)}\n")
                 f.write(f"{seg.text.strip()}\n\n")
 
+        # Burn captions into video
+        jobs[job_id]["status"] = "rendering"
+        final_path = os.path.join(OUTPUT_DIR, f"{job_id}_final.mp4")
+        burn_command = [
+            "ffmpeg", "-y",
+            "-i", clip_path,
+            "-vf", f"subtitles={srt_path}:force_style='FontName=Arial,FontSize=24,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=2,Shadow=1'",
+            "-c:a", "copy",
+            final_path
+        ]
+        subprocess.run(burn_command, check=True)
+
         # Done
         jobs[job_id]["status"] = "completed"
-        jobs[job_id]["download_url"] = f"/download/{os.path.basename(clip_path)}"
+        jobs[job_id]["download_url"] = f"/download/{os.path.basename(final_path)}"
         jobs[job_id]["captions_url"] = f"/download/{os.path.basename(srt_path)}"
 
     except Exception as e:
