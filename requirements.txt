@@ -1,5 +1,5 @@
 Flask
+gunicorn
 redis
 rq
-gunicorn
 yt-dlp
