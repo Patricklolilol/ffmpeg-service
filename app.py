@@ -1,53 +1,58 @@
 import os
 import uuid
-import redis
-from rq import Queue
 from flask import Flask, request, jsonify
+from redis import Redis
+from rq import Queue
+from worker import process_media
 
 app = Flask(__name__)
 
 # Redis connection
-redis_url = os.getenv("REDIS_URL")
-if not redis_url:
-    raise ValueError("Missing REDIS_URL in environment variables")
+redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+redis_conn = Redis.from_url(redis_url)
+q = Queue(connection=redis_conn)
 
-conn = redis.from_url(redis_url)
-q = Queue(connection=conn)
+# Ensure outputs dir exists
+os.makedirs("outputs", exist_ok=True)
 
-# Healthcheck
-@app.route("/health", methods=["GET"])
+
+@app.route("/health")
 def health():
-    return {"status": "ok"}
+    return jsonify({"status": "ok"})
 
-# Submit job
+
 @app.route("/process", methods=["POST"])
 def process():
-    data = request.get_json()
-    if not data or "media_url" not in data:
-        return jsonify({"error": "media_url is required"}), 400
-
-    media_url = data["media_url"]
-    job_id = str(uuid.uuid4())
-
-    from worker import process_video  # import the task function
-
-    job = q.enqueue(process_video, media_url, job_id, job_id=job_id)
-
-    return jsonify({"job_id": job.get_id(), "status": "queued"})
-
-# Check job status
-@app.route("/status/<job_id>", methods=["GET"])
-def status(job_id):
-    from rq.job import Job
-
     try:
-        job = Job.fetch(job_id, connection=conn)
-    except Exception:
-        return jsonify({"error": "Job not found"}), 404
+        data = request.get_json()
+        media_url = data.get("media_url")
+        if not media_url:
+            return jsonify({"error": "Missing media_url"}), 400
 
-    if job.is_finished:
-        return jsonify({"status": "completed", "result": job.result})
-    elif job.is_failed:
-        return jsonify({"status": "failed", "error": str(job.exc_info)})
-    else:
-        return jsonify({"status": job.get_status()})
+        job_id = str(uuid.uuid4())
+        job = q.enqueue(process_media, media_url, job_id, job_timeout="15m")
+
+        return jsonify({"job_id": job.get_id(), "status": "queued"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/status/<job_id>")
+def status(job_id):
+    try:
+        job = q.fetch_job(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+
+        if job.is_finished:
+            return jsonify({"status": "completed", "result": job.result})
+        elif job.is_failed:
+            return jsonify({"status": "failed", "error": str(job.exc_info)})
+        else:
+            return jsonify({"status": job.get_status()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
