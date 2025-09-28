@@ -1,0 +1,27 @@
+version: "3.8"
+services:
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - PORT=8080
+    command: ./start.sh
+    volumes:
+      - ./outputs:/app/outputs
+
+  worker:
+    build: .
+    depends_on:
+      - redis
+    environment:
+      - REDIS_URL=redis://redis:6379
+    command: ./start_worker.sh
+    volumes:
+      - ./outputs:/app/outputs
