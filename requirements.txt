@@ -1,5 +1,5 @@
-flask
-gunicorn
-redis
-rq
+Flask==2.3.2
+gunicorn==21.2.0
+redis==5.0.1
+rq==1.15.1
 yt-dlp
