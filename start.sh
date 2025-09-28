@@ -1,12 +1,17 @@
-#!/usr/bin/env bash
+#!/bin/sh
 set -e
 
-# Ensure outputs dir exists
-mkdir -p outputs
+# quick env check
+if [ -z "$REDIS_URL" ]; then
+  echo "ERROR: REDIS_URL environment variable is not set. Set it in Railway variables."
+  exit 1
+fi
 
-# Bind to Railway provided PORT if present, else 8080
-PORT=${PORT:-8080}
-GUNICORN_WORKERS=${GUNICORN_WORKERS:-1}
-GUNICORN_TIMEOUT=${GUNICORN_TIMEOUT:-120}
+# Start RQ worker in background (will connect to REDIS_URL). The 'rq' CLI will fail
+# if REDIS_URL is missing; we already checked above.
+echo "Starting RQ worker..."
+rq worker -u "$REDIS_URL" default &
 
-exec gunicorn -b 0.0.0.0:${PORT} app:app --workers ${GUNICORN_WORKERS} --timeout ${GUNICORN_TIMEOUT}
+# Start Gunicorn (allow Railway's $PORT). Use shell form so ${PORT} expands.
+echo "Starting Gunicorn on port ${PORT:-8080}..."
+exec gunicorn -b 0.0.0.0:${PORT:-8080} app:app
