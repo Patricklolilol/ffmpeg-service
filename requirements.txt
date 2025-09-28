@@ -1,5 +1,5 @@
 flask==2.3.3
-redis==5.0.10
+redis==5.0.8
 rq==1.5.3
 gunicorn==23.1.2
 yt-dlp==2025.9.1
