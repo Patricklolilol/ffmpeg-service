@@ -1,52 +1,94 @@
-from flask import Flask, request, jsonify, send_from_directory
-from redis import Redis
-from rq import Queue
+# app.py
 import os
 import uuid
-from tasks import process_media
+import json
+import glob
+import shutil
+import subprocess
+from pathlib import Path
+from flask import Flask, request, jsonify, send_from_directory, abort
+import redis
+from rq import Queue
+
+# Config
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "outputs"))
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Connect to Redis and RQ
+redis_conn = redis.from_url(REDIS_URL)
+q = Queue("default", connection=redis_conn, default_timeout=60 * 60 * 2)  # 2 hours
+
+# Local job state keys prefix
+JOB_PREFIX = "job:"
 
 app = Flask(__name__)
 
-# Redis connection
-redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-redis_conn = Redis.from_url(redis_url)
-q = Queue("default", connection=redis_conn)
+
+def _set_job_state(job_id: str, data: dict):
+    redis_conn.set(f"{JOB_PREFIX}{job_id}", json.dumps(data), ex=60 * 60 * 6)
+
+
+def _get_job_state(job_id: str):
+    raw = redis_conn.get(f"{JOB_PREFIX}{job_id}")
+    return json.loads(raw) if raw else None
+
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
+
 @app.route("/process", methods=["POST"])
 def process():
-    data = request.get_json()
-    media_url = data.get("media_url")
+    payload = request.get_json(force=True, silent=True)
+    if not payload:
+        return jsonify({"error": "invalid JSON body"}), 400
 
+    media_url = payload.get("media_url")
     if not media_url:
-        return jsonify({"error": "Missing media_url"}), 400
+        return jsonify({"error": "media_url missing"}), 400
 
     job_id = str(uuid.uuid4())
-    job = q.enqueue(process_media, media_url, job_id, job_id=job_id)
+    # initial state
+    _set_job_state(job_id, {"status": "queued", "message": "Job queued", "job_id": job_id})
 
-    return jsonify({"job_id": job.get_id(), "status": "queued"})
+    # enqueue background job (jobs.process_media)
+    # import deferred (jobs is a module file shipped with the repo)
+    from jobs import process_media
+
+    q.enqueue(process_media, job_id, media_url, OUTPUT_DIR.as_posix())
+
+    return jsonify({"job_id": job_id, "status": "queued"}), 202
+
 
 @app.route("/status/<job_id>", methods=["GET"])
 def status(job_id):
-    from rq.job import Job
-    try:
-        job = Job.fetch(job_id, connection=redis_conn)
-    except:
+    st = _get_job_state(job_id)
+    if not st:
         return jsonify({"error": "Job not found"}), 404
+    return jsonify(st)
 
-    if job.is_finished:
-        return jsonify({"status": "completed", "download_url": f"/download/{job_id}_clip.mp4"})
-    elif job.is_failed:
-        return jsonify({"status": "failed", "error": str(job.exc_info)})
-    else:
-        return jsonify({"status": job.get_status()})
 
-@app.route("/download/<path:filename>")
+@app.route("/download/<path:filename>", methods=["GET"])
 def download(filename):
-    return send_from_directory("outputs", filename, as_attachment=True)
+    # Security: only serve from OUTPUT_DIR
+    safe_path = (OUTPUT_DIR / filename).resolve()
+    if not str(safe_path).startswith(str(OUTPUT_DIR.resolve())) or not safe_path.exists():
+        abort(404)
+    return send_from_directory(OUTPUT_DIR.as_posix(), filename, as_attachment=True)
+
+
+@app.errorhandler(500)
+def handle_500(e):
+    app.logger.exception("Internal server error")
+    return (
+        "<!doctype html><html><head><title>500 Internal Server Error</title></head>"
+        "<body><h1><p>Internal Server Error</p></h1></body></html>",
+        500,
+    )
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+    # for local debugging
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), debug=False)
