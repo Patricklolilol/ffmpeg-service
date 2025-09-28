@@ -1,28 +1,15 @@
 import os
+import subprocess
 import uuid
-from flask import Flask, request, jsonify, send_from_directory
-from redis import Redis
-from rq import Queue
-import traceback
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# Redis connection (Railway injects REDIS_URL)
-redis_url = os.getenv("REDIS_URL")
-if not redis_url:
-    raise RuntimeError("❌ REDIS_URL environment variable is not set")
-
-redis_conn = Redis.from_url(redis_url)
-q = Queue(connection=redis_conn)
-
-# Import task function from worker
-from worker import process_media
-
+os.makedirs("outputs", exist_ok=True)
 
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"})
-
 
 @app.route("/process", methods=["POST"])
 def process():
@@ -33,39 +20,18 @@ def process():
             return jsonify({"error": "Missing media_url"}), 400
 
         job_id = str(uuid.uuid4())
-        job = q.enqueue(process_media, media_url, job_id, job_timeout="15m")
+        input_path = f"outputs/{job_id}.%(ext)s"
 
-        return jsonify({"job_id": job.get_id(), "status": "queued"})
-    except Exception as e:
-        print("❌ ERROR in /process:", traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+        # Download
+        cmd = ["yt-dlp", "-f", "bestaudio", "-o", input_path, media_url]
+        subprocess.check_call(cmd)
 
-
-@app.route("/status/<job_id>")
-def status(job_id):
-    try:
-        job = q.fetch_job(job_id)
-        if not job:
-            return jsonify({"error": "Job not found"}), 404
-
-        if job.is_failed:
-            return jsonify({"status": "failed", "error": str(job.exc_info)})
-        elif job.result:
-            return jsonify({"status": "completed", "download_url": job.result["download_url"]})
-        else:
-            return jsonify({"status": "processing"})
+        return jsonify({
+            "job_id": job_id,
+            "status": "queued",
+            "message": "Download started"
+        })
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": f"yt-dlp failed: {str(e)}"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-@app.route("/download/<path:filename>")
-def download(filename):
-    try:
-        return send_from_directory("outputs", filename, as_attachment=True)
-    except FileNotFoundError:
-        return jsonify({"error": "File not found"}), 404
-
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
