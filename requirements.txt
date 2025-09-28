@@ -1,6 +1,5 @@
 flask==2.3.3
+gunicorn==21.2.0
 redis==5.0.8
 rq==1.15.1
-gunicorn==23.1.2
-yt-dlp==2025.9.1
-python-dotenv==1.1.0
+yt-dlp==2025.1.15
