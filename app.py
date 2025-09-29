@@ -1,33 +1,20 @@
-import os, uuid, json
+# app.py
+import os
+import uuid
+import json
 from flask import Flask, request, jsonify, send_from_directory, abort
+import redis
 
-from redis import Redis
-from rq import Queue
+from jobs import enqueue_job  # import your enqueue function
 
 app = Flask(__name__)
+
 OUTPUT_DIR = os.path.join(os.getcwd(), "outputs")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-REDIS_URL = os.getenv("REDIS_URL")
-redis_conn = None
-queue = None
-if REDIS_URL:
-    redis_conn = Redis.from_url(REDIS_URL)
-    queue = Queue("default", connection=redis_conn)
-
-
-def write_info(job_id: str, info: dict):
-    path = os.path.join(OUTPUT_DIR, f"{job_id}.json")
-    with open(path, "w") as f:
-        json.dump(info, f)
-
-
-def read_info(job_id: str):
-    path = os.path.join(OUTPUT_DIR, f"{job_id}.json")
-    if not os.path.exists(path):
-        return None
-    with open(path) as f:
-        return json.load(f)
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+redis_conn = redis.from_url(REDIS_URL)
+JOB_PREFIX = "job:"
 
 
 @app.route("/health")
@@ -43,20 +30,9 @@ def process():
         return jsonify({"error": "media_url required"}), 400
 
     job_id = str(uuid.uuid4())
-    info = {
-        "job_id": job_id,
-        "status": "queued",
-        "stage": "queued",
-        "progress": 0,
-        "media_url": media_url
-    }
-    write_info(job_id, info)
 
-    if queue is None:
-        return jsonify({"error": "Redis not configured on server"}), 500
-
-    # enqueue the worker task (worker imports tasks.process_media)
-    queue.enqueue("tasks.process_media", job_id, media_url, job_timeout=3600)
+    # enqueue the worker job
+    enqueue_job(job_id, media_url, OUTPUT_DIR)
 
     return jsonify({"job_id": job_id, "status": "queued"}), 202
 
@@ -69,40 +45,33 @@ def info():
     if not job_id:
         return jsonify({"error": "job_id required"}), 400
 
-    info = read_info(job_id)
-    if info is None:
+    raw = redis_conn.get(f"{JOB_PREFIX}{job_id}")
+    if not raw:
         return jsonify({"code": 1, "message": "job not found"}), 404
 
-    # Build response according to the shape ClipMaster/Lovable expects:
+    info = json.loads(raw)
+
+    # Build response
     resp_data = {
         "progress": info.get("progress", 0),
         "stage": info.get("stage"),
         "status": info.get("status"),
     }
 
-    # attach conversion and screenshots if present, make absolute URLs
+    # Add conversion + screenshots if present
     host = request.host_url.rstrip("/")
-    if info.get("conversion") and info["conversion"].get("file"):
+    if info.get("output_file"):
         resp_data["conversion"] = {
-            "url": f"{host}/download/{info['conversion']['file']}",
-            "file": info["conversion"]["file"]
+            "url": f"{host}/download/{info['output_file']}",
+            "file": info["output_file"],
         }
-    if info.get("screenshots"):
-        s_list = []
-        for fname in info["screenshots"]:
-            s_list.append({"url": f"{host}/download/{fname}", "file": fname})
-        resp_data["screenshots"] = s_list
 
-    # use code 0 to indicate the service responded successfully
     response_body = {"code": 0, "data": resp_data}
-    # Use 200 when processing/completed, 202 otherwise (keeps compatibility)
-    status_code = 200 if info.get("status") in ("processing", "completed") else 202
-    return jsonify(response_body), status_code
+    return jsonify(response_body), 200
 
 
 @app.route("/download/<path:filename>")
 def download(filename):
-    # safe-serving file from outputs
     filepath = os.path.join(OUTPUT_DIR, filename)
     if not os.path.exists(filepath):
         return abort(404)
