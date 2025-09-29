@@ -1,11 +1,5 @@
 flask==2.3.3
-gunicorn==20.1.0
-redis==8.2.1
-rq==1.13.0
-yt-dlp
+redis==5.0.8
+rq==2.6.0
+yt-dlp==2024.10.7
 ffmpeg-python==0.2.0
-opencv-python-headless==4.8.0.76
-numpy==1.25.2
-pydub==0.25.1
-# Optional ML / transcription: (heavy) enable if you want automatic transcription
-# faster-whisper
