@@ -1,190 +1,169 @@
+# tasks.py
 import os
-import shlex
 import time
 import json
+import glob
+import shlex
 import subprocess
+import math
 from pathlib import Path
-from yt_dlp import YoutubeDL
-from redis import Redis
-from rq import get_current_job
 
-REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-redis_conn = Redis.from_url(REDIS_URL)
+import redis
 
-ROOT = Path(__file__).parent.resolve()
-OUT_DIR = ROOT / "outputs"
-OUT_DIR.mkdir(exist_ok=True)
+REDIS_URL = os.getenv("REDIS_URL", "")
+if not REDIS_URL:
+    raise RuntimeError("REDIS_URL env var must be set for worker")
 
+redis_conn = redis.from_url(REDIS_URL, decode_responses=True)
 
-def safe_run(cmd):
-    print("CMD:", cmd)
-    proc = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    print("STDOUT:", proc.stdout)
-    print("STDERR:", proc.stderr)
-    if proc.returncode != 0:
-        raise RuntimeError(f"Command failed: {cmd}\nSTDERR: {proc.stderr}")
-    return proc.stdout
+FFMPEG_SERVICE_URL = os.getenv("FFMPEG_SERVICE_URL", "").strip().rstrip("/")
+if FFMPEG_SERVICE_URL and not FFMPEG_SERVICE_URL.startswith("http"):
+    FFMPEG_SERVICE_URL = "https://" + FFMPEG_SERVICE_URL
 
+OUTPUTS_DIR = os.path.join(os.getcwd(), "outputs")
+os.makedirs(OUTPUTS_DIR, exist_ok=True)
 
-def download_media(media_url, dest_path):
-    ydl_opts = {
-        "outtmpl": str(dest_path),
-        "format": "bestaudio/best+bestvideo/best",
-        "quiet": True,
-        "no_warnings": True,
-    }
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(media_url, download=True)
-    return info
+def job_key(job_id: str) -> str:
+    return f"job:{job_id}"
 
+def update_job(job_id: str, mapping: dict):
+    mapping = {k: (json.dumps(v) if isinstance(v, (list, dict)) else str(v)) for k, v in mapping.items()}
+    redis_conn.hset(job_key(job_id), mapping=mapping)
+    redis_conn.hset(job_key(job_id), mapping={"updated_at": str(int(time.time()))})
+    # also print for logs
+    print(f"[tasks] job {job_id} update:", mapping)
 
-def transcribe_audio_if_possible(audio_file, srt_out):
-    # optional faster-whisper - only run if installed
-    try:
-        from faster_whisper import WhisperModel
-    except Exception:
-        print("faster-whisper not available: skipping transcription")
-        return False
+def run_cmd(cmd, cwd=None, env=None):
+    print(f"[tasks] run: {' '.join(shlex.quote(c) for c in cmd)}")
+    res = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    print(res.stdout)
+    res.check_returncode()
+    return res.stdout
 
-    model = WhisperModel("small", device="cpu", compute_type="int8")
-    segments, info = model.transcribe(str(audio_file), beam_size=5)
-    # write simple SRT
-    with open(srt_out, "w", encoding="utf-8") as fh:
-        idx = 1
-        for seg in segments:
-            start = seg.start
-            end = seg.end
-            def fmt(t):
-                h = int(t // 3600)
-                m = int((t % 3600) // 60)
-                s = int(t % 60)
-                ms = int((t - int(t)) * 1000)
-                return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-            fh.write(f"{idx}\n")
-            fh.write(f"{fmt(start)} --> {fmt(end)}\n")
-            fh.write(seg.text.strip() + "\n\n")
-            idx += 1
-    return True
+def get_media_file_for_job(job_id: str):
+    # find first matching file outputs/{job_id}.*
+    candidates = glob.glob(os.path.join(OUTPUTS_DIR, f"{job_id}.*"))
+    if candidates:
+        return candidates[0]
+    # sometimes yt-dlp writes outputs/{title}.{ext} — try by folder match
+    candidates = glob.glob(os.path.join(OUTPUTS_DIR, f"{job_id}*"))
+    return candidates[0] if candidates else None
 
-
-def burn_subtitles(input_video, srt_file, out_video):
-    # ffmpeg with subtitles filter (libass must be present in ffmpeg build)
-    cmd = f'ffmpeg -y -i "{input_video}" -vf "subtitles={srt_file}:force_style=\'FontName=DejaVu Sans,Fontsize=28\'" -c:a copy "{out_video}"'
-    safe_run(cmd)
-
-
-def create_clips_from_video(video_file, out_prefix, job_meta):
-    """
-    Create three short clips at approximate highlights:
-    - This is a simple algorithm: create 3 equal-length clips from the video.
-    - You can replace this with face-detection / speaker-change logic later.
-    """
-    # get duration
-    cmd = f'ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "{video_file}"'
-    out = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    if out.returncode != 0:
-        raise RuntimeError("ffprobe failed: " + out.stderr)
-    duration = float(out.stdout.strip())
-    clip_len = max(3, min(30, int(duration / 6)))  # clip length heuristic
-
-    clips = []
-    thumbs = []
-    starts = [max(0, (duration * i) / 4) for i in range(1, 4)]
-    for i, s in enumerate(starts, start=1):
-        clip_path = Path(video_file).parent / f"{out_prefix}_clip_{i}.mp4"
-        cmd = f'ffmpeg -y -ss {s:.2f} -i "{video_file}" -t {clip_len} -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k "{clip_path}"'
-        safe_run(cmd)
-        clips.append(clip_path.name)
-
-        thumb_path = Path(video_file).parent / f"{out_prefix}_thumb_{i}.jpg"
-        cmd2 = f'ffmpeg -y -ss {s:.2f} -i "{video_file}" -frames:v 1 -q:v 2 "{thumb_path}"'
-        safe_run(cmd2)
-        thumbs.append(thumb_path.name)
-
-    return clips, thumbs
-
-
-def process_job(job_id, media_url, options):
-    """
-    Worker entrypoint — runs inside RQ worker.
-    Steps:
-      - download media
-      - extract audio/video as .mp4
-      - optional transcription -> produce subtitles and burn into clips
-      - generate clips and thumbs
-      - write metadata into job.meta
-    """
-    job = get_current_job()
-    try:
-        job.meta["stage"] = "downloading"
-        job.meta["progress"] = 5
-        job.save_meta()
-
-        workdir = OUT_DIR / job_id
-        workdir.mkdir(parents=True, exist_ok=True)
-
-        # Download into workdir/input.%(ext)s
-        out_template = str(workdir / "input.%(ext)s")
-        info = download_media(media_url, out_template)
-
-        # find downloaded file (mp4/mkv/webm)
-        downloaded = None
-        for p in workdir.iterdir():
-            if p.name.startswith("input.") and p.is_file():
-                downloaded = p
-                break
-        if downloaded is None:
-            raise RuntimeError("Download did not produce file")
-
-        # For safety convert to mp4 container if needed
-        mp4_file = workdir / f"{job_id}.mp4"
-        cmd_copy = f'ffmpeg -y -i "{downloaded}" -c:v copy -c:a aac -b:a 128k "{mp4_file}"'
-        safe_run(cmd_copy)
-
-        job.meta["stage"] = "transcribing"
-        job.meta["progress"] = 30
-        job.save_meta()
-
-        srt_file = workdir / f"{job_id}.srt"
-        transcribed = transcribe_audio_if_possible(mp4_file, srt_file)
-
-        job.meta["stage"] = "clipping"
-        job.meta["progress"] = 50
-        job.save_meta()
-
-        # create clips (3) and thumbs
-        out_prefix = job_id
-        clips, thumbs = create_clips_from_video(mp4_file, out_prefix, job.meta)
-
-        # If we have subtitles, burn them into each clip (optional)
-        if transcribed and srt_file.exists():
-            job.meta["stage"] = "burning_captions"
-            job.meta["progress"] = 80
-            job.save_meta()
-            # burn separately for each clip
-            for i, clip in enumerate(clips, start=1):
-                clip_path = workdir / clip
-                burned = workdir / f"{out_prefix}_clip_{i}_captioned.mp4"
+def probe_duration(file_path: str) -> float:
+    import json as _json
+    cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", file_path]
+    out = subprocess.check_output(cmd, text=True)
+    info = _json.loads(out)
+    dur = None
+    if "format" in info and "duration" in info["format"]:
+        try:
+            dur = float(info["format"]["duration"])
+        except:
+            dur = None
+    if not dur:
+        # fallback
+        for s in info.get("streams", []):
+            if s.get("duration"):
                 try:
-                    burn_subtitles(clip_path, srt_file, burned)
-                    # replace clip with captioned version
-                    clip_path.unlink()
-                    burned.rename(clip_path)
-                except Exception as e:
-                    print("Burn subtitles failed for", clip_path, e)
+                    dur = float(s["duration"])
+                    break
+                except:
+                    pass
+    return dur or 0.0
 
-        # final metadata save
-        job.meta["stage"] = "completed"
-        job.meta["progress"] = 100
-        job.meta["options"] = options
-        job.save_meta()
+def safe_join_url(path: str) -> str:
+    if not path:
+        return ""
+    if FFMPEG_SERVICE_URL:
+        return FFMPEG_SERVICE_URL.rstrip("/") + "/" + path.lstrip("/")
+    return path
 
-        # return a small result
-        return {"job_id": job_id, "clips": clips, "thumbnails": thumbs}
+def process_media(job_id: str, media_url: str):
+    """
+    Background task: download, create clips and thumbs, update Redis metadata.
+    """
+    try:
+        update_job(job_id, {"status": "processing", "stage": "downloading", "progress": 0})
+        out_template = os.path.join(OUTPUTS_DIR, f"{job_id}.%(ext)s")
+        # download with yt-dlp
+        cmd = ["yt-dlp", "-f", "bestvideo+bestaudio/best", "-o", out_template, media_url]
+        run_cmd(cmd)
 
-    except Exception as exc:
-        print("Job failed:", exc)
-        job.meta["stage"] = "failed"
-        job.meta["progress"] = 0
-        job.save_meta()
+        # locate the downloaded file
+        input_file = get_media_file_for_job(job_id)
+        if not input_file:
+            raise RuntimeError("Download produced no file")
+
+        update_job(job_id, {"stage": "downloaded", "progress": 5, "input_file": input_file})
+
+        # probe duration
+        duration = probe_duration(input_file)
+        if duration <= 0:
+            # still proceed but set small duration
+            duration = 60.0
+        update_job(job_id, {"stage": "probing", "progress": 8, "duration": str(duration)})
+
+        # decide on clip lengths: produce 3 clips, prefer ~30s or duration/3
+        clip_length = min(30, max(5, duration / 3.0))
+        starts = []
+        if duration <= clip_length * 1.5:
+            starts = [0.0]
+            clip_length = max(1.0, duration)
+        else:
+            starts = [0.0, max(0.0, (duration / 2.0) - (clip_length / 2.0)), max(0.0, duration - clip_length)]
+        clip_paths = []
+        thumbs = []
+
+        total_steps = len(starts) * 2 + 3
+        step = 0
+
+        for idx, start in enumerate(starts, start=1):
+            step += 1
+            update_job(job_id, {"stage": "clipping", "progress": int(10 + step * 70 / total_steps)})
+            out_clip = os.path.join(OUTPUTS_DIR, f"{job_id}_clip{idx}.mp4")
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-ss", str(max(0, float(start))),
+                "-i", input_file,
+                "-t", str(int(math.ceil(clip_length))),
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "23",
+                "-c:a", "aac",
+                out_clip
+            ]
+            run_cmd(cmd)
+            clip_paths.append(out_clip)
+
+            # generate thumbnail for this clip
+            step += 1
+            update_job(job_id, {"stage": "thumbnail", "progress": int(10 + step * 70 / total_steps)})
+            thumb_out = os.path.join(OUTPUTS_DIR, f"{job_id}_thumb{idx}.jpg")
+            cmd2 = ["ffmpeg", "-y", "-ss", str(max(0, float(start) + 0.5)), "-i", input_file, "-vframes", "1", "-q:v", "2", thumb_out]
+            run_cmd(cmd2)
+            thumbs.append(thumb_out)
+
+        # final packaging: create response URLs
+        clips_urls = ["/download/" + Path(p).name for p in clip_paths]
+        thumbs_urls = ["/download/" + Path(p).name for p in thumbs]
+
+        # store results in redis
+        update_job(job_id, {
+            "status": "completed",
+            "stage": "completed",
+            "progress": 100,
+            "conversion_url": clips_urls[0] if clips_urls else "",
+            "clips": clips_urls,
+            "screenshots": thumbs_urls
+        })
+        return {"ok": True}
+
+    except subprocess.CalledProcessError as e:
+        msg = f"Command failed: {e}. Output: {getattr(e, 'output', '')}"
+        update_job(job_id, {"status": "failed", "stage": "failed", "progress": 0, "error_message": msg})
+        raise
+    except Exception as e:
+        msg = f"Error: {e}"
+        update_job(job_id, {"status": "failed", "stage": "failed", "progress": 0, "error_message": msg})
         raise
