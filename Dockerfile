@@ -1,4 +1,3 @@
-# Dockerfile - single image used for both API and worker (override start command on Railway for worker)
 FROM python:3.10-slim
 
 # system deps for ffmpeg, fonts (for burned captions), yt-dlp, build tools
@@ -14,8 +13,8 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 WORKDIR /app
 COPY . .
 
-# Ensure outputs dir exists and worker script is executable
-RUN mkdir -p /app/outputs && chmod +x /app/start_worker.sh
+# Ensure outputs dir exists
+RUN mkdir -p /app/outputs
 
-# Default command (API service)
-CMD ["sh", "-c", "gunicorn -b 0.0.0.0:${PORT:-8080} app:app"]
+# Server start (expand $PORT at runtime)
+CMD ["sh","-lc","gunicorn -b 0.0.0.0:${PORT:-8080} app:app"]
