@@ -7,4 +7,4 @@ pydub
 python-multipart
 requests
 python-dotenv
-faster-whisper==0.8.1
+faster-whisper==1.0.3
