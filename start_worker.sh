@@ -1,39 +1,25 @@
-#!/bin/sh
-set -e
-
+#!/usr/bin/env bash
+set -euo pipefail
 echo "Starting RQ worker (waiting for Redis)..."
-echo "REDIS_URL=$REDIS_URL"
-
-# ensure outputs dir exists
-mkdir -p /app/outputs
-
-# wait loop for Redis to be reachable (best-effort)
-TRIES=0
-MAX_TRIES=10
-until python - <<'PY'
-import os, sys, redis
-url = os.getenv("REDIS_URL")
+# Python wait+start (keeps logs readable)
+python - <<'PY'
+import os, time, sys
+from redis import Redis
+url = os.getenv("REDIS_URL", "")
 if not url:
-    print("REDIS_URL not set", file=sys.stderr)
-    sys.exit(2)
-try:
-    r = redis.from_url(url)
-    r.ping()
-    print("redis reachable")
-    sys.exit(0)
-except Exception as e:
-    print("redis not ready:", e)
+    print("REDIS_URL is not set", file=sys.stderr)
     sys.exit(1)
+for i in range(60):
+    try:
+        Redis.from_url(url).ping()
+        print("redis reachable")
+        sys.exit(0)
+    except Exception as e:
+        print("waiting for redis...", e)
+        time.sleep(1)
+print("redis not reachable after timeout", file=sys.stderr)
+sys.exit(1)
 PY
-do
-  TRIES=$((TRIES+1))
-  if [ "$TRIES" -ge "$MAX_TRIES" ]; then
-    echo "Redis did not become ready after $MAX_TRIES tries, continuing anyway..."
-    break
-  fi
-  sleep 1
-done
 
-# Start the rq worker using the console script (do NOT use python -m rq)
-# Use exec so the process id is the worker (better container behavior)
-exec rq worker --url "$REDIS_URL" default
+# exec the programmatic worker (replaces invocation of CLI)
+exec python worker.py
