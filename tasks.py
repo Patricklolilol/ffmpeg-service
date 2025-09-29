@@ -30,7 +30,6 @@ def update_job(job_id: str, mapping: dict):
     mapping = {k: (json.dumps(v) if isinstance(v, (list, dict)) else str(v)) for k, v in mapping.items()}
     redis_conn.hset(job_key(job_id), mapping=mapping)
     redis_conn.hset(job_key(job_id), mapping={"updated_at": str(int(time.time()))})
-    # also print for logs
     print(f"[tasks] job {job_id} update:", mapping)
 
 def run_cmd(cmd, cwd=None, env=None):
@@ -41,11 +40,9 @@ def run_cmd(cmd, cwd=None, env=None):
     return res.stdout
 
 def get_media_file_for_job(job_id: str):
-    # find first matching file outputs/{job_id}.*
     candidates = glob.glob(os.path.join(OUTPUTS_DIR, f"{job_id}.*"))
     if candidates:
         return candidates[0]
-    # sometimes yt-dlp writes outputs/{title}.{ext} — try by folder match
     candidates = glob.glob(os.path.join(OUTPUTS_DIR, f"{job_id}*"))
     return candidates[0] if candidates else None
 
@@ -61,7 +58,6 @@ def probe_duration(file_path: str) -> float:
         except:
             dur = None
     if not dur:
-        # fallback
         for s in info.get("streams", []):
             if s.get("duration"):
                 try:
@@ -71,39 +67,24 @@ def probe_duration(file_path: str) -> float:
                     pass
     return dur or 0.0
 
-def safe_join_url(path: str) -> str:
-    if not path:
-        return ""
-    if FFMPEG_SERVICE_URL:
-        return FFMPEG_SERVICE_URL.rstrip("/") + "/" + path.lstrip("/")
-    return path
-
 def process_media(job_id: str, media_url: str):
-    """
-    Background task: download, create clips and thumbs, update Redis metadata.
-    """
     try:
         update_job(job_id, {"status": "processing", "stage": "downloading", "progress": 0})
         out_template = os.path.join(OUTPUTS_DIR, f"{job_id}.%(ext)s")
-        # download with yt-dlp
         cmd = ["yt-dlp", "-f", "bestvideo+bestaudio/best", "-o", out_template, media_url]
         run_cmd(cmd)
 
-        # locate the downloaded file
         input_file = get_media_file_for_job(job_id)
         if not input_file:
             raise RuntimeError("Download produced no file")
 
         update_job(job_id, {"stage": "downloaded", "progress": 5, "input_file": input_file})
 
-        # probe duration
         duration = probe_duration(input_file)
         if duration <= 0:
-            # still proceed but set small duration
             duration = 60.0
         update_job(job_id, {"stage": "probing", "progress": 8, "duration": str(duration)})
 
-        # decide on clip lengths: produce 3 clips, prefer ~30s or duration/3
         clip_length = min(30, max(5, duration / 3.0))
         starts = []
         if duration <= clip_length * 1.5:
@@ -136,7 +117,6 @@ def process_media(job_id: str, media_url: str):
             run_cmd(cmd)
             clip_paths.append(out_clip)
 
-            # generate thumbnail for this clip
             step += 1
             update_job(job_id, {"stage": "thumbnail", "progress": int(10 + step * 70 / total_steps)})
             thumb_out = os.path.join(OUTPUTS_DIR, f"{job_id}_thumb{idx}.jpg")
@@ -144,11 +124,9 @@ def process_media(job_id: str, media_url: str):
             run_cmd(cmd2)
             thumbs.append(thumb_out)
 
-        # final packaging: create response URLs
         clips_urls = ["/download/" + Path(p).name for p in clip_paths]
         thumbs_urls = ["/download/" + Path(p).name for p in thumbs]
 
-        # store results in redis
         update_job(job_id, {
             "status": "completed",
             "stage": "completed",
