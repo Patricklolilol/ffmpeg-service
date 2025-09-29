@@ -1,5 +1,6 @@
 import os, json, subprocess
 from yt_dlp import YoutubeDL
+from rq import get_current_job  # <-- NEW
 
 OUTPUT_DIR = os.path.join(os.getcwd(), "outputs")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -9,6 +10,12 @@ def write_info(job_id: str, info: dict):
     path = os.path.join(OUTPUT_DIR, f"{job_id}.json")
     with open(path, "w") as f:
         json.dump(info, f)
+
+    # also update Redis metadata so /info can read it
+    job = get_current_job()
+    if job:
+        job.meta.update(info)
+        job.save_meta()
 
 
 def find_downloaded_file(job_id: str):
@@ -24,7 +31,7 @@ def process_media(job_id: str, media_url: str):
      - Download via yt-dlp to outputs/jobid.ext
      - Make a thumbnail
      - Make a 30s clip (fallback to re-encode if copy fails)
-     - Update outputs/jobid.json with progress/stage/status and conversion/screenshots
+     - Update outputs/jobid.json AND job.meta with progress/stage/status
     """
     info = {"job_id": job_id, "status": "processing", "stage": "downloading", "progress": 0}
     write_info(job_id, info)
