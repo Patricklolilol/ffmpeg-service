@@ -1,4 +1,3 @@
-# jobs.py
 import os
 import json
 import glob
@@ -32,19 +31,29 @@ def _get_first_downloaded(path_prefix: str):
 
 
 def run_cmd(cmd, timeout=None):
+    """
+    Run a shell command and log stdout/stderr to worker logs
+    for debugging on Railway.
+    """
     if isinstance(cmd, str):
         cmd = shlex.split(cmd)
+
+    print(f"[RUN] {' '.join(cmd)}")
     proc = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=timeout,
     )
-    return (
-        proc.returncode,
-        proc.stdout.decode("utf-8", errors="ignore"),
-        proc.stderr.decode("utf-8", errors="ignore"),
-    )
+    out = proc.stdout.decode("utf-8", errors="ignore")
+    err = proc.stderr.decode("utf-8", errors="ignore")
+
+    if out.strip():
+        print(f"[STDOUT]\n{out}")
+    if err.strip():
+        print(f"[STDERR]\n{err}")
+
+    return proc.returncode, out, err
 
 
 def process_media(job_id: str, media_url: str, output_dir: str):
