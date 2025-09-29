@@ -1,4 +1,4 @@
-import os, json, subprocess, time
+import os, json, subprocess
 from yt_dlp import YoutubeDL
 
 OUTPUT_DIR = os.path.join(os.getcwd(), "outputs")
@@ -38,13 +38,13 @@ def process_media(job_id: str, media_url: str):
     except Exception as e:
         info.update({"status": "failed", "stage": "download_failed", "error": str(e)})
         write_info(job_id, info)
-        return
+        raise
 
     downloaded = find_downloaded_file(job_id)
     if not downloaded:
         info.update({"status": "failed", "stage": "no_downloaded_file", "error": "no file found"})
         write_info(job_id, info)
-        return
+        raise FileNotFoundError("No downloaded file found")
 
     input_path = os.path.join(OUTPUT_DIR, downloaded)
 
@@ -58,7 +58,7 @@ def process_media(job_id: str, media_url: str):
     except Exception as e:
         info.update({"status": "failed", "stage": "thumbnail_failed", "error": str(e)})
         write_info(job_id, info)
-        return
+        raise
 
     # clip (first 30s) - try stream copy first
     info.update({"progress": 70, "stage": "creating_clip"})
@@ -77,7 +77,7 @@ def process_media(job_id: str, media_url: str):
         except Exception as e:
             info.update({"status": "failed", "stage": "clip_failed", "error": str(e)})
             write_info(job_id, info)
-            return
+            raise
 
     # done
     info.update({
@@ -88,4 +88,4 @@ def process_media(job_id: str, media_url: str):
         "screenshots": [thumb_fname]
     })
     write_info(job_id, info)
-    return   raise
+    return clip_fname
