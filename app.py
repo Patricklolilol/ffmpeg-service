@@ -1,116 +1,113 @@
-# app.py
-import os
-import uuid
-import time
-import json
+import os, uuid, json
 from flask import Flask, request, jsonify, send_from_directory, abort
-import redis
-import rq
-import tasks  # ensure this is importable for RQ worker
+
+from redis import Redis
+from rq import Queue
 
 app = Flask(__name__)
+OUTPUT_DIR = os.path.join(os.getcwd(), "outputs")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-REDIS_URL = os.getenv("REDIS_URL", "")
-if not REDIS_URL:
-    raise RuntimeError("REDIS_URL env var must be set")
+REDIS_URL = os.getenv("REDIS_URL")
+redis_conn = None
+queue = None
+if REDIS_URL:
+    redis_conn = Redis.from_url(REDIS_URL)
+    queue = Queue("default", connection=redis_conn)
 
-redis_conn = redis.from_url(REDIS_URL, decode_responses=True)
-queue = rq.Queue("default", connection=redis_conn)
 
-FFMPEG_SERVICE_URL = os.getenv("FFMPEG_SERVICE_URL", "").strip().rstrip("/")
-if FFMPEG_SERVICE_URL and not FFMPEG_SERVICE_URL.startswith("http"):
-    FFMPEG_SERVICE_URL = "https://" + FFMPEG_SERVICE_URL
+def write_info(job_id: str, info: dict):
+    path = os.path.join(OUTPUT_DIR, f"{job_id}.json")
+    with open(path, "w") as f:
+        json.dump(info, f)
 
-OUTPUTS_DIR = os.path.join(os.getcwd(), "outputs")
 
-def job_key(job_id: str) -> str:
-    return f"job:{job_id}"
+def read_info(job_id: str):
+    path = os.path.join(OUTPUT_DIR, f"{job_id}.json")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
 
-@app.route("/health", methods=["GET"])
+
+@app.route("/health")
 def health():
     return jsonify({"status": "ok"})
 
+
 @app.route("/process", methods=["POST"])
-def process_route():
-    payload = request.get_json(force=True, silent=True) or {}
-    media_url = payload.get("media_url") or payload.get("url") or payload.get("mediaUrl")
+def process():
+    body = request.get_json(silent=True) or {}
+    media_url = body.get("media_url")
     if not media_url:
         return jsonify({"error": "media_url required"}), 400
 
     job_id = str(uuid.uuid4())
-    created = int(time.time())
-    initial = {
+    info = {
+        "job_id": job_id,
         "status": "queued",
         "stage": "queued",
-        "progress": "0",
-        "created_at": str(created),
-        "updated_at": str(created),
+        "progress": 0,
         "media_url": media_url
     }
-    redis_conn.hset(job_key(job_id), mapping=initial)
+    write_info(job_id, info)
 
-    # enqueue background job
-    queue.enqueue(tasks.process_media, job_id, media_url, job_timeout=60*60*2)
+    if queue is None:
+        return jsonify({"error": "Redis not configured on server"}), 500
 
-    response = {"job_id": job_id, "status": "queued"}
-    return jsonify(response), 202
+    # enqueue the worker task (worker imports tasks.process_media)
+    queue.enqueue("tasks.process_media", job_id, media_url, job_timeout=3600)
 
-@app.route("/info", methods=["POST"])
-def info_route():
-    payload = request.get_json(force=True, silent=True) or {}
-    job_id = payload.get("job_id") or payload.get("jobId")
+    return jsonify({"job_id": job_id, "status": "queued"}), 202
+
+
+@app.route("/info", methods=["POST", "GET"])
+def info():
+    # Accept POST { job_id } or GET ?job_id=
+    body = request.get_json(silent=True) or {}
+    job_id = body.get("job_id") or request.args.get("job_id")
     if not job_id:
-        return jsonify({"code": 1, "message": "job_id required"}), 400
+        return jsonify({"error": "job_id required"}), 400
 
-    key = job_key(job_id)
-    if not redis_conn.exists(key):
-        return jsonify({"code": 2, "message": "job not found"}), 404
+    info = read_info(job_id)
+    if info is None:
+        return jsonify({"code": 1, "message": "job not found"}), 404
 
-    raw = redis_conn.hgetall(key)
-    status = raw.get("status", "")
-    stage = raw.get("stage", "")
-    try:
-        progress = int(raw.get("progress", "0"))
-    except Exception:
-        progress = 0
-
-    screenshots = []
-    if raw.get("screenshots"):
-        try:
-            screenshots = json.loads(raw.get("screenshots"))
-        except Exception:
-            screenshots = [raw.get("screenshots")]
-
-    clips = []
-    if raw.get("clips"):
-        try:
-            clips = json.loads(raw.get("clips"))
-        except Exception:
-            clips = []
-
-    conversion_url = raw.get("conversion_url") or ""
-    if conversion_url and FFMPEG_SERVICE_URL and conversion_url.startswith("/"):
-        conversion_url = FFMPEG_SERVICE_URL.rstrip("/") + conversion_url
-
-    data = {
-        "status": status,
-        "stage": stage,
-        "progress": progress,
-        "screenshots": screenshots,
-        "clips": clips,
-        "conversion": {"url": conversion_url} if conversion_url else None,
+    # Build response according to the shape ClipMaster/Lovable expects:
+    resp_data = {
+        "progress": info.get("progress", 0),
+        "stage": info.get("stage"),
+        "status": info.get("status"),
     }
-    return jsonify({"code": 0, "data": data}), 200
 
-@app.route("/download/<path:filename>", methods=["GET"])
+    # attach conversion and screenshots if present, make absolute URLs
+    host = request.host_url.rstrip("/")
+    if info.get("conversion") and info["conversion"].get("file"):
+        resp_data["conversion"] = {
+            "url": f"{host}/download/{info['conversion']['file']}",
+            "file": info["conversion"]["file"]
+        }
+    if info.get("screenshots"):
+        s_list = []
+        for fname in info["screenshots"]:
+            s_list.append({"url": f"{host}/download/{fname}", "file": fname})
+        resp_data["screenshots"] = s_list
+
+    # use code 0 to indicate the service responded successfully
+    response_body = {"code": 0, "data": resp_data}
+    # Use 200 when processing/completed, 202 otherwise (keeps compatibility)
+    status_code = 200 if info.get("status") in ("processing", "completed") else 202
+    return jsonify(response_body), status_code
+
+
+@app.route("/download/<path:filename>")
 def download(filename):
-    safe_path = os.path.abspath(OUTPUTS_DIR)
-    target = os.path.abspath(os.path.join(OUTPUTS_DIR, filename))
-    if not target.startswith(safe_path):
-        abort(403)
-    if not os.path.exists(target):
-        return jsonify({"error": "file not found"}), 404
-    return send_from_directory(OUTPUTS_DIR, filename, as_attachment=True)
+    # safe-serving file from outputs
+    filepath = os.path.join(OUTPUT_DIR, filename)
+    if not os.path.exists(filepath):
+        return abort(404)
+    return send_from_directory(OUTPUT_DIR, filename, as_attachment=True)
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
