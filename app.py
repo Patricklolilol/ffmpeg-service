@@ -2,7 +2,7 @@
 import os
 import uuid
 import json
-from flask import Flask, request, jsonify, send_from_directory, abort
+from flask import Flask, request, jsonify, send_from_directory, abort, redirect
 import redis
 
 from jobs import enqueue_job  # import your enqueue function
@@ -58,9 +58,15 @@ def info():
         "status": info.get("status"),
     }
 
-    # Add conversion + screenshots if present
-    host = request.host_url.rstrip("/")
-    if info.get("output_file"):
+    # If worker uploaded to S3, return that URL (permanent)
+    if info.get("output_url"):
+        resp_data["conversion"] = {
+            "url": info["output_url"],
+            "file": info.get("output_file"),
+        }
+    # Otherwise expose the local download route
+    elif info.get("output_file"):
+        host = request.host_url.rstrip("/")
         resp_data["conversion"] = {
             "url": f"{host}/download/{info['output_file']}",
             "file": info["output_file"],
@@ -73,9 +79,20 @@ def info():
 @app.route("/download/<path:filename>")
 def download(filename):
     filepath = os.path.join(OUTPUT_DIR, filename)
-    if not os.path.exists(filepath):
-        return abort(404)
-    return send_from_directory(OUTPUT_DIR, filename, as_attachment=True)
+    if os.path.exists(filepath):
+        return send_from_directory(OUTPUT_DIR, filename, as_attachment=True)
+    # If local file not present, attempt to find output_url for that file in Redis:
+    # We assume filename contains job_id or is unique. We'll try to find it by scanning keys.
+    for key in redis_conn.scan_iter(f"{JOB_PREFIX}*"):
+        raw = redis_conn.get(key)
+        if not raw:
+            continue
+        info = json.loads(raw)
+        if info.get("output_file") == filename:
+            if info.get("output_url"):
+                return redirect(info["output_url"], code=302)
+            break
+    return abort(404)
 
 
 if __name__ == "__main__":
