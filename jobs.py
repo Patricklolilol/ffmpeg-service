@@ -98,12 +98,12 @@ def process_media(job_id: str, media_url: str, output_dir: str):
         {"status": "processing", "stage": "converting", "progress": 40, "job_id": job_id},
     )
 
-    # 2) convert to mp4
-    final_mp4 = outdir / f"{job_id}.mp4"
+    # 2) convert to mp4 (output to a different filename)
+    converted_mp4 = outdir / f"{job_id}_converted.mp4"
     ffmpeg_cmd = [
         "ffmpeg", "-y", "-i", input_file,
         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-        "-c:a", "aac", "-movflags", "+faststart", str(final_mp4)
+        "-c:a", "aac", "-movflags", "+faststart", str(converted_mp4)
     ]
     code2, _, err2 = run_cmd(ffmpeg_cmd, timeout=900)
     if code2 != 0:
@@ -114,7 +114,7 @@ def process_media(job_id: str, media_url: str, output_dir: str):
             "-vf", "scale=1280:-2",  # resize if needed
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
             "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+faststart", str(final_mp4)
+            "-movflags", "+faststart", str(converted_mp4)
         ]
         code2b, _, err2b = run_cmd(ffmpeg_cmd_fallback, timeout=900)
         if code2b != 0:
@@ -131,7 +131,7 @@ def process_media(job_id: str, media_url: str, output_dir: str):
         {"status": "processing", "stage": "clipping", "progress": 70, "job_id": job_id},
     )
     ffmpeg_clip_cmd = [
-        "ffmpeg", "-y", "-ss", "00:00:00", "-i", str(final_mp4),
+        "ffmpeg", "-y", "-ss", "00:00:00", "-i", str(converted_mp4),
         "-t", "30", "-c", "copy", str(clip_file)
     ]
     code3, _, err3 = run_cmd(ffmpeg_clip_cmd, timeout=300)
@@ -139,7 +139,7 @@ def process_media(job_id: str, media_url: str, output_dir: str):
         print("[WARN] Stream copy failed, re-encoding clip...")
         # fallback re-encode
         ffmpeg_clip_cmd2 = [
-            "ffmpeg", "-y", "-ss", "00:00:00", "-i", str(final_mp4), "-t", "30",
+            "ffmpeg", "-y", "-ss", "00:00:00", "-i", str(converted_mp4), "-t", "30",
             "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", "-b:a", "128k", str(clip_file)
         ]
         code3b, _, err3b = run_cmd(ffmpeg_clip_cmd2, timeout=300)
