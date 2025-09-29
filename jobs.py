@@ -107,11 +107,22 @@ def process_media(job_id: str, media_url: str, output_dir: str):
     ]
     code2, _, err2 = run_cmd(ffmpeg_cmd, timeout=900)
     if code2 != 0:
-        _set_job_state(
-            job_id,
-            {"status": "failed", "stage": "convert_failed", "error": err2, "job_id": job_id},
-        )
-        return
+        print("[WARN] Primary conversion failed, retrying with fallback...")
+        # fallback: safe re-encode with scaling
+        ffmpeg_cmd_fallback = [
+            "ffmpeg", "-y", "-i", input_file,
+            "-vf", "scale=1280:-2",  # resize if needed
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart", str(final_mp4)
+        ]
+        code2b, _, err2b = run_cmd(ffmpeg_cmd_fallback, timeout=900)
+        if code2b != 0:
+            _set_job_state(
+                job_id,
+                {"status": "failed", "stage": "convert_failed", "error": f"{err2}; fallback: {err2b}", "job_id": job_id},
+            )
+            return
 
     # 3) create 30s clip
     clip_file = outdir / f"{job_id}_clip.mp4"
@@ -125,16 +136,17 @@ def process_media(job_id: str, media_url: str, output_dir: str):
     ]
     code3, _, err3 = run_cmd(ffmpeg_clip_cmd, timeout=300)
     if code3 != 0:
+        print("[WARN] Stream copy failed, re-encoding clip...")
         # fallback re-encode
         ffmpeg_clip_cmd2 = [
             "ffmpeg", "-y", "-ss", "00:00:00", "-i", str(final_mp4), "-t", "30",
-            "-c:v", "libx264", "-c:a", "aac", str(clip_file)
+            "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", "-b:a", "128k", str(clip_file)
         ]
         code3b, _, err3b = run_cmd(ffmpeg_clip_cmd2, timeout=300)
         if code3b != 0:
             _set_job_state(
                 job_id,
-                {"status": "failed", "stage": "clip_failed", "error": f"{err3}; {err3b}", "job_id": job_id},
+                {"status": "failed", "stage": "clip_failed", "error": f"{err3}; fallback: {err3b}", "job_id": job_id},
             )
             return
 
