@@ -1,13 +1,11 @@
-#!/usr/bin/env bash
-set -e
+#!/bin/sh
+set -eu
 
-# Ensure outputs dir exists
-mkdir -p outputs
+# Prefer REDIS_URL environment variable (Railway shared var name)
+: "${REDIS_URL:?Environment variable REDIS_URL must be set}"
 
-if [ -z "$REDIS_URL" ]; then
-  echo "ERROR: REDIS_URL is not set"
-  exit 1
-fi
+# Optional: log which redis url is being used (be careful if exposing secrets)
+echo "Starting rq worker with REDIS_URL=${REDIS_URL#*://*****@}"
 
-# Start an rq worker using the REDIS_URL env var
-exec rq worker --url "$REDIS_URL" default
+# Exec the worker so it receives signals correctly
+exec rq worker -u "$REDIS_URL" default
