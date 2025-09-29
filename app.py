@@ -1,137 +1,163 @@
-# app.py
 import os
 import uuid
-import time
 import json
-import logging
-from flask import Flask, request, jsonify, abort
+import shutil
+import traceback
+from pathlib import Path
+from flask import Flask, request, jsonify, send_from_directory, abort
+from redis import Redis
+from rq import Queue, get_current_job
+from tasks import process_job
+
+# Config from env
+REDIS_URL = os.environ.get("REDIS_URL", "")
+FFMPEG_API_KEY = os.environ.get("FFMPEG_API_KEY", "")
+ALLOW_NO_APIKEY = os.environ.get("ALLOW_NO_APIKEY", "true").lower() in ("1", "true", "yes")
+
+if not REDIS_URL:
+    # For local dev a fallback:
+    REDIS_URL = os.environ.get("RQ_REDIS_URL", "redis://localhost:6379/0")
+
+redis_conn = Redis.from_url(REDIS_URL)
+q = Queue(connection=redis_conn)
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
+ROOT = Path(__file__).parent.resolve()
+OUT_DIR = ROOT / "outputs"
+OUT_DIR.mkdir(exist_ok=True)
 
-# Simple in-memory job store for demo. Replace with persistent DB in prod.
-JOBS = {}
 
-# API key (optional) — set FFMPEG_API_KEY in Railway env if you want to require it.
-API_KEY = os.getenv("FFMPEG_API_KEY")
+def check_api_key(req):
+    if not FFMPEG_API_KEY:
+        return ALLOW_NO_APIKEY
+    header_key = req.headers.get("X-API-Key") or req.headers.get("x-api-key")
+    return header_key == FFMPEG_API_KEY
 
-def require_api_key_hdr():
-    if not API_KEY:
-        return True
-    key = request.headers.get("x-api-key")
-    return key == API_KEY
-
-@app.before_request
-def check_api_key():
-    # enforce only if API_KEY exists in env
-    if API_KEY:
-        key = request.headers.get("x-api-key")
-        if key != API_KEY:
-            abort(401, description="Invalid or missing API key")
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status":"ok"})
+    return jsonify({"status": "ok"})
+
 
 @app.route("/process", methods=["POST"])
 def process():
-    """
-    Accepts JSON:
-      { "media_url": "...", "options": {...} }
-    For demo we will accept and queue a job and immediately return job_id + status "queued"
-    To support synchronous mode in future, you can return code:0 + data on success (200).
-    """
     try:
-        payload = request.get_json(force=True)
-        app.logger.info("POST /process payload: %s", payload)
+        if not check_api_key(request):
+            return jsonify({"error": "Missing or invalid API key"}), 401
 
-        media_url = payload.get("media_url")
+        data = request.get_json(force=True)
+        media_url = data.get("media_url") or data.get("url") or data.get("input")
+        options = data.get("options", {})
         if not media_url:
-            return jsonify({"status":"error", "message":"media_url required"}), 400
+            return jsonify({"error": "media_url is required"}), 400
 
-        # Create a job id for your service (this is your ffmpeg_job_id that lovables stores)
-        ffmpeg_job_id = str(uuid.uuid4())
-        now = int(time.time())
+        job_id = str(uuid.uuid4())
+        workdir = OUT_DIR / job_id
+        workdir.mkdir(parents=True, exist_ok=True)
 
-        # store minimal job metadata; a real service would spawn a background worker
-        JOBS[ffmpeg_job_id] = {
-            "job_id": ffmpeg_job_id,
-            "status": "queued",
-            "media_url": media_url,
-            "options": payload.get("options") or {},
-            "created_at": now,
-            "updated_at": now,
-            # "progress": 0,
-            # "result": None
-        }
+        # enqueue background job
+        rq_job = q.enqueue(process_job, job_id, media_url, options, result_ttl=3600 * 24)
 
-        # Immediately return asynchronous accepted shape (202)
-        resp = {"job_id": ffmpeg_job_id, "status": "queued"}
-        app.logger.info("Queued ffmpeg job: %s", resp)
+        # respond in async (queued) format — support both snake_case and camelCase
+        resp = {"job_id": rq_job.get_id(), "status": "queued"}
         return jsonify(resp), 202
 
     except Exception as e:
-        app.logger.exception("Error in /process")
-        return jsonify({"status":"error","message": str(e)}), 500
+        traceback.print_exc()
+        return jsonify({"error": "Processing failed", "detail": str(e)}), 500
+
 
 @app.route("/info", methods=["POST"])
 def info():
     """
-    Report status of a ffmpeg job. Accepts:
-      { "job_id": "<id>" }
-    Responds:
-      - If processing: {"job_id": "...", "status": "processing", "progress": 20}
-      - If queued: {"job_id":"...","status":"queued"}
-      - If completed: {"code":0, "data": { "conversion": {"url": "/download/<file>"}, "screenshots":[...]} }
-      - If failed: {"code":1, "message":"failed reason"}
+    FFmpeg /info compatibility endpoint (POST { job_id })
+    Returns job status and, if completed, download URLs
     """
     try:
+        if not check_api_key(request):
+            return jsonify({"error": "Missing or invalid API key"}), 401
+
         payload = request.get_json(force=True)
-        app.logger.info("/info payload: %s", payload)
+        # accept job_id or jobId
         job_id = payload.get("job_id") or payload.get("jobId")
         if not job_id:
-            return jsonify({"status":"error","message":"job_id required"}), 400
+            return jsonify({"error": "job_id required"}), 400
 
-        job = JOBS.get(job_id)
-        if not job:
-            return jsonify({"code":1,"message":"job not found"}), 404
+        # check RQ job
+        from rq.job import Job
+        try:
+            job = Job.fetch(job_id, connection=redis_conn)
+        except Exception:
+            return jsonify({"code": 1, "message": "Job not found"}), 404
 
-        # Demo: simulate flow transitions depending on age
-        age = int(time.time()) - job["created_at"]
+        if job.is_finished:
+            meta = job.meta or {}
+            # gather files
+            outdir = OUT_DIR / job_id
+            clips = []
+            thumbs = []
+            if outdir.exists():
+                for f in sorted(outdir.iterdir()):
+                    name = f.name
+                    if name.endswith("_clip.mp4"):
+                        clips.append(request.host_url.rstrip("/") + "/download/" + job_id + "_" + name)
+                    if name.endswith("_thumb.jpg") or name.endswith("_thumb.png"):
+                        thumbs.append(request.host_url.rstrip("/") + "/download/" + job_id + "_" + name)
 
-        if age < 3:
-            # queued
-            return jsonify({"job_id": job_id, "status": "queued"}), 200
-        elif age < 8:
-            # processing
-            return jsonify({"job_id": job_id, "status": "processing", "progress": 30}), 200
-        else:
-            # completed — return a data shape similar to what Lovable expects:
-            # code === 0 and data with conversion.url and screenshots
-            output_file = f"/download/{job_id}_clip.mp4"
-            data = {
-                "conversion": {"url": output_file},
-                "screenshots": [
-                    {"time": 0.0, "url": f"/download/{job_id}_thumb1.jpg"},
-                    {"time": 1.5, "url": f"/download/{job_id}_thumb2.jpg"}
-                ]
+            resp = {
+                "code": 0,
+                "data": {
+                    "status": "completed",
+                    "clips": clips,
+                    "thumbnails": thumbs,
+                    "metadata": meta.get("options", {})
+                }
             }
-            # mark job as completed in store
-            job["status"] = "completed"
-            job["result"] = data
-            job["updated_at"] = int(time.time())
-            return jsonify({"code": 0, "data": data}), 200
+            return jsonify(resp), 200
+
+        if job.is_failed:
+            return jsonify({"code": 2, "message": "failed", "error": str(job.exc_info or "")}), 200
+
+        # queued or started
+        progress = job.meta.get("progress", 0) if job.meta else 0
+        stage = job.meta.get("stage", "queued") if job.meta else "queued"
+        return jsonify({"code": 0, "data": {"status": "processing", "stage": stage, "progress": progress}}), 202
 
     except Exception as e:
-        app.logger.exception("Error in /info")
-        return jsonify({"status":"error","message": str(e)}), 500
+        traceback.print_exc()
+        return jsonify({"error": "info failed", "detail": str(e)}), 500
 
-# Simple download endpoints for demo — in prod these would stream actual files
+
+@app.route("/status/<job_id>", methods=["GET"])
+def status(job_id):
+    # helper endpoint for Lovable polling of our own DB-style status
+    from rq.job import Job
+    try:
+        job = Job.fetch(job_id, connection=redis_conn)
+    except Exception:
+        return jsonify({"error": "Job not found"}), 404
+
+    if job.is_finished:
+        return jsonify({"status": "completed", "download_urls": [request.host_url.rstrip("/") + "/download/" + job_id + "_" + p.name for p in (OUT_DIR / job_id).glob("*")]}), 200
+    if job.is_failed:
+        return jsonify({"status": "failed", "error": str(job.exc_info)}), 200
+    return jsonify({"status": "processing", "meta": job.meta}), 200
+
+
 @app.route("/download/<path:filename>", methods=["GET"])
-def download_demo(filename):
-    # For demo we return a JSON message instead of real binary files.
-    return jsonify({"message": "This is a placeholder for " + filename}), 200
+def download(filename):
+    """
+    Serve files created under outputs/.
+    We prefix files with job id when writing them, so path like <jobid>_<file>.
+    """
+    # prevent path traversal
+    safe = Path(filename).name
+    # Search outputs for filename (return the first match)
+    for root, dirs, files in os.walk(str(OUT_DIR)):
+        if safe in files:
+            return send_from_directory(root, safe, as_attachment=True)
+    abort(404, description="File not found")
+
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
