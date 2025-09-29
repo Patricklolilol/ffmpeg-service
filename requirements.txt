@@ -1,6 +1,10 @@
 flask==2.3.3
 gunicorn==23.0.0
-yt-dlp==2024.10.7
-ffmpeg-python==0.2.0
-redis==5.0.8
+redis==5.3.1
 rq==1.6.0
+yt-dlp
+pydub
+python-multipart
+requests
+python-dotenv
+faster-whisper==0.8.1
