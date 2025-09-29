@@ -62,8 +62,7 @@ def process_media(job_id: str, media_url: str, output_dir: str):
     Steps:
       1) download via yt-dlp
       2) transcode to mp4
-      3) create 30s clip
-      4) update Redis state
+      3) update Redis state
     """
     outdir = Path(output_dir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -111,7 +110,7 @@ def process_media(job_id: str, media_url: str, output_dir: str):
         # fallback: safe re-encode with scaling
         ffmpeg_cmd_fallback = [
             "ffmpeg", "-y", "-i", input_file,
-            "-vf", "scale=1280:-2",  # resize if needed
+            "-vf", "scale=1280:-2",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
             "-c:a", "aac", "-b:a", "128k",
             "-movflags", "+faststart", str(converted_mp4)
@@ -124,33 +123,7 @@ def process_media(job_id: str, media_url: str, output_dir: str):
             )
             return
 
-    # 3) create 30s clip
-    clip_file = outdir / f"{job_id}_clip.mp4"
-    _set_job_state(
-        job_id,
-        {"status": "processing", "stage": "clipping", "progress": 70, "job_id": job_id},
-    )
-    ffmpeg_clip_cmd = [
-        "ffmpeg", "-y", "-ss", "00:00:00", "-i", str(converted_mp4),
-        "-t", "30", "-c", "copy", str(clip_file)
-    ]
-    code3, _, err3 = run_cmd(ffmpeg_clip_cmd, timeout=300)
-    if code3 != 0:
-        print("[WARN] Stream copy failed, re-encoding clip...")
-        # fallback re-encode
-        ffmpeg_clip_cmd2 = [
-            "ffmpeg", "-y", "-ss", "00:00:00", "-i", str(converted_mp4), "-t", "30",
-            "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", "-b:a", "128k", str(clip_file)
-        ]
-        code3b, _, err3b = run_cmd(ffmpeg_clip_cmd2, timeout=300)
-        if code3b != 0:
-            _set_job_state(
-                job_id,
-                {"status": "failed", "stage": "clip_failed", "error": f"{err3}; fallback: {err3b}", "job_id": job_id},
-            )
-            return
-
-    # 4) success
+    # 3) success (skip clipping for now, return converted file)
     _set_job_state(
         job_id,
         {
@@ -159,10 +132,10 @@ def process_media(job_id: str, media_url: str, output_dir: str):
             "progress": 100,
             "message": "Completed",
             "job_id": job_id,
-            "output_file": clip_file.name,
+            "output_file": converted_mp4.name,
         },
     )
-    return clip_file.name
+    return converted_mp4.name
 
 
 def enqueue_job(job_id: str, media_url: str, output_dir: str = "outputs"):
@@ -170,7 +143,6 @@ def enqueue_job(job_id: str, media_url: str, output_dir: str = "outputs"):
     Call this from app.py when receiving /process.
     Enqueues the RQ worker job and sets initial Redis state.
     """
-    # initialize job state in Redis
     _set_job_state(job_id, {"status": "queued", "stage": "queued", "progress": 0, "job_id": job_id})
 
     return q.enqueue(
@@ -179,6 +151,6 @@ def enqueue_job(job_id: str, media_url: str, output_dir: str = "outputs"):
         media_url,
         output_dir,
         job_id=job_id,
-        result_ttl=86400,  # keep result 1 day
-        ttl=86400          # job stays in queue max 1 day
+        result_ttl=86400,
+        ttl=86400
     )
